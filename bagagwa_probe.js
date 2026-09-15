@@ -165,6 +165,7 @@
         '  <button class="bwp-btn" id="bwp-all">run all</button>',
         '  <button class="bwp-btn" id="bwp-clear">clear output</button>',
         '  <button class="bwp-btn" id="bwp-dl">download log</button>',
+        '  <button class="bwp-btn" id="bwp-clearsaved" style="display:none;">clear saved log</button>',
         '</div>',
     ].join("");
     document.body.appendChild(root);
@@ -197,6 +198,26 @@
     var LOG = [];
     var MAXDOM = 1200;
 
+    /* Crash-persisted log. On a static host there is no server log, and the single most
+     * common failure on a console is the WebProcess dying mid-run -- at which point an
+     * in-memory log dies with the page. Every line therefore ALSO lands in localStorage
+     * (kept tail-truncated), and on the next load anything saved is restored behind a
+     * clear-saved-log button, so the last lines before a crash are readable off-console.
+     * The download log button reads this same store, so a log survives even a crash that
+     * happened on a previous page load. Ported from OzRviju/bagagwa-exploit's bgw_log. */
+    var LOGKEY = "bwslop_sc_log";
+    var persisted = null;
+    try { persisted = localStorage.getItem(LOGKEY); } catch (e) { }
+
+    function persistAppend(line) {
+        try {
+            var cur = localStorage.getItem(LOGKEY) || "";
+            cur += line + "\n";
+            if (cur.length > 16000) cur = cur.slice(-8000);
+            localStorage.setItem(LOGKEY, cur);
+        } catch (e) { }
+    }
+
     function stamp() {
         var d = new Date();
         var p = function (n, w) { return String(n).padStart(w || 2, "0"); };
@@ -206,6 +227,7 @@
     function paint(text, cls) {
         var line = "[" + stamp() + "] " + text;
         LOG.push(line);
+        persistAppend(line);
         var span = document.createElement("span");
         if (cls) span.className = "bwp-" + cls;
         span.textContent = line + "\n";
@@ -213,6 +235,13 @@
         while (elOut.childNodes.length > MAXDOM) elOut.removeChild(elOut.firstChild);
         elOut.scrollTop = elOut.scrollHeight;
         elCount.textContent = LOG.length + " lines";
+    }
+
+    function persistClear() {
+        try { localStorage.removeItem(LOGKEY); } catch (e) { }
+        var b = document.getElementById("bwp-clearsaved");
+        if (b) b.style.display = "none";
+        paint("saved log cleared", "dim");
     }
 
     /* Everything a payload logs goes to this panel AND to the page's own log AND to the
@@ -232,6 +261,19 @@
      * firmware is resolveSlot() failing to find the parked worker, and the operator has to
      * be able to read that rather than watch the tab die silently. */
     function S(label, nr, args) {
+        /* A wedge during ANY earlier payload latches W.dead=true in the executor. The
+         * error thrown at the end of that spin was already beacons as RW-WEDGE with a
+         * shape diagnosis, but the NEXT call would otherwise burn ANOTHER full spin cap
+         * (~135s) before failing the same way -- the exact pathology rop-worker's wedge
+         * block documents. Refuse instead: say it is dead and point at the beacons. */
+        try {
+            var st0 = (window.rop_worker && window.rop_worker.state) || null;
+            if (st0 && st0.dead) {
+                out(label, "SKIPPED -- executor latched dead (RW-WEDGE beacons have the "
+                    + "shape diagnosis); reload the page, do NOT keep calling", "err");
+                return { label: label, nr: nr, threw: "executor dead", ok: false };
+            }
+        } catch (e) { }
         var a = (args || []).slice(0, 6);
         while (a.length < 6) a.push(undefined);
         var t0 = Date.now();
@@ -397,11 +439,47 @@
     /* T5 -- what the executor actually resolved. Read-only introspection, so a failure
      * above can be attributed: a missing kbase, a hijack slot found at an unexpected
      * offset, or LK offsets that fell back to another firmware's defaults (the 13.x
-     * failure mode -- see p2jb_lk.js group C). */
+     * failure mode -- see p2jb_lk.js group C).
+     *
+     * Also runs the poison self-check ported from OzRviju's build: if a return value
+     * could be confused with a real result, the whole panel's verdicts are worthless.
+     * W.retval is zeroed before every chain (fireSync does wr64(W.retval,0n)), so 0
+     * already means "did not run" for our purposes; the poison instead proves the OPPOSITE
+     * direction -- that a value we might read as a result is genuinely written by THIS
+     * chain, not stale. write64(W.retval, POISON) then getpid(): retval must come back as
+     * the pid (lower 32 bits, sign-extended into a full word by the adapter's decode),
+     * i.e. the chain overwrote the poison and ran to completion. If it still reads the
+     * poison, the chain never executed; if it reads anything else nonzero, the return
+     * slot is not what we think it is. Either way the panel says so instead of silently
+     * trusting every later hex() line. */
     function pExecutor() {
         var st = null;
         try { st = (window.rop_worker && window.rop_worker.state) || null; } catch (e) { }
         if (!st) { out("T5-VERDICT", "rop_worker.state is not reachable", "err"); return { ok: false, summary: "no state" }; }
+
+        var POISON = 0xC0FFEEDEADBEEFn;
+        var poisonOK = false, poisonDetail = "skipped";
+        try {
+            if (window.write64 && window.syscall) {
+                window.write64(B(st.retval), POISON);
+                var pr = S("poison-getpid", 0x014, []);
+                if (pr.ret === undefined) {
+                    poisonDetail = "getpid threw: " + pr.threw;
+                } else {
+                    var rv = B(pr.ret);
+                    var pid = Number(BigInt.asIntN(32, rv));
+                    if (rv === POISON) {
+                        poisonDetail = "STILL POISON -- the chain never executed";
+                    } else if (rv !== 0n && pid > 0) {
+                        poisonOK = true;
+                        poisonDetail = "chain ran, overwrote the poison -- retval slot proven (pid=" + pid + ")";
+                    } else {
+                        poisonDetail = "retval neither poison nor a plausible pid (" + hex(rv) + ") -- return slot suspect";
+                    }
+                }
+            }
+        } catch (e) { poisonDetail = "threw: " + String((e && e.message) || e).slice(0, 80); }
+        out("T5-POISON", poisonDetail, poisonOK ? "ok" : "warn");
 
         var lk = null;
         try { lk = (window.P2JB_LK && window.P2JB_LK[FW]) || null; } catch (e) { }
@@ -421,6 +499,7 @@
             if (v !== undefined) parts.push(keys[i] + "=" + (typeof v === "bigint" ? hex(v) : String(v)));
         }
         out("T5-state", parts.join("  "), "dim");
+        if (st.dead) out("T5-dead", "W.dead is LATCHED -- every further syscall is refused (see RW-WEDGE)", "err");
         var threads = 0;
         try { threads = (st.threads || []).length; } catch (e) { }
         if (threads) out("T5-threads", threads + " thread(s) found by the libthr walk", "dim");
@@ -525,7 +604,10 @@
 
     function download() {
         try {
-            var blob = new Blob([LOG.join("\n") + "\n"], { type: "text/plain" });
+            var saved = null;
+            try { saved = localStorage.getItem(LOGKEY); } catch (e) { }
+            var body = (saved && saved.length > LOG.join("\n").length) ? saved : (LOG.join("\n") + "\n");
+            var blob = new Blob([body], { type: "text/plain" });
             var a = document.createElement("a");
             a.href = URL.createObjectURL(blob);
             a.download = "bagagwa_" + FW + "_" + Date.now() + ".txt";
@@ -542,6 +624,8 @@
     document.getElementById("bwp-clear").onclick = function () {
         elOut.innerHTML = ""; LOG.length = 0; elCount.textContent = "0 lines";
     };
+    var clearSaved = document.getElementById("bwp-clearsaved");
+    if (clearSaved) clearSaved.onclick = persistClear;
     document.getElementById("bwp-dl").onclick = download;
     document.getElementById("bwp-hide").onclick = function () {
         root.style.display = "none";
@@ -561,6 +645,19 @@
     paint("Bagagwa panel up on " + FW + ". Userland succeeded; nothing below writes kernel memory.", "sec");
     paint("errno 78 = ENOSYS. If AIO reach reports it, the chain is dead on this firmware.", "dim");
     paint("", null);
+
+    /* Restore the previous run's tail, if there was one -- this is how a crashed run is
+     * read on the next boot. The clear-saved-log button only appears when there is
+     * something to clear. */
+    if (persisted) {
+        var tail = persisted.slice(-4000).split("\n").filter(function (l) { return l.length; });
+        paint("--- saved log from a previous run (" + tail.length + " lines shown) ---", "warn");
+        for (var pi = 0; pi < tail.length; pi++) paint("    " + tail[pi], "dim");
+        paint("--- end saved log; new lines resume below ---", "warn");
+        paint("", null);
+        var csb = document.getElementById("bwp-clearsaved");
+        if (csb) csb.style.display = "";
+    }
 
     notify("bagagwa panel up on " + FW);
     try { runAll(); } catch (e) {
