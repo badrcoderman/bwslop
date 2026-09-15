@@ -11,8 +11,17 @@ const supportedFirmwares = [
     "8.40", "8.60", "9.00", "9.05", "9.20", "9.40", "9.60", "10.00", "10.01",
     "10.20", "10.40", "10.60", "11.00", "11.20", "11.40", "11.60",
     "12.00", "12.02", "12.20", "12.40", "12.60", "12.70", "13.00",
-    "13.20"
+    "13.20", "13.60"
 ];
+// 13.60 joined 2026-09-15 for the USERLAND half only. Its profile (offsets/13.60.js)
+// carries the WebKit/LK layer but NO OFFSET_KERNEL_*, so prepare() and the worker ROP
+// executor run and every syscall works, while neither poops.js nor p2jb.js can reach
+// their kernel stages (both refuse rather than use another firmware's data offsets).
+// That is enough to test reachability on a firmware no kernel exploit covers yet.
+// 13.00/13.20 stay listed but still cannot prepare(): their profiles carry no
+// OFFSET_lk__thread_list / OFFSET_lk_worker_wait_return yet, so find_worker() throws.
+// 13.40 is deliberately absent - no offsets/13.40.js exists, and listing it would make
+// this file inject a 404.
 // parsed, not a fixed 4 chars: that returned "12.0" for firmware 12.02
 const fw_match = /PlayStation 5\/(\d+\.\d+)/.exec(navigator.userAgent);
 window.fw_str = fw_match ? fw_match[1] : "";
@@ -1257,4 +1266,4 @@ async function main(userlandRW, wkOnly = false) {
 let fwScript = document.createElement('script');
 document.body.appendChild(fwScript);
 
-fwScript.setAttribute('src', `offsets/${window.fw_str}.js?v=128`);
+fwScript.setAttribute('src', `offsets/${window.fw_str}.js?v=129`);

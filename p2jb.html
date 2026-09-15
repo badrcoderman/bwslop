@@ -283,7 +283,7 @@ otherwise.</div>
      fix looked applied on disk and was invisible on hardware. rop.js/syscalls.js had
      NO ?v= at all, which is the same trap with no warning. -->
 <script src="rop.js?v=128"></script>
-<script src="main.js?v=128"></script>
+<script src="main.js?v=129"></script>
 <script>window.offsetsReady = new Promise(function (res, rej) {
     var s = document.querySelector('script[src^="offsets/"]');
     if (!s) return rej(new Error("offsets script was never injected by main.js"));
@@ -951,6 +951,14 @@ window.syncMark = function (tag, extra) {
         if (!window.__won && wonJoin) showWin();
     } catch (e) { }
 };
+
+// Expose the real on-screen log to externally-loaded scripts. bagagwa_probe.js arrives
+// as a plain <script> (not a module), so it cannot see this scope: without these two it
+// had only window.syncMark, which beacons but never paints anything the operator can
+// read on the console. Function declarations hoist, so assigning here is safe even
+// though flushMark/stage are defined further down the file.
+window.flushMark = flushMark;
+window.stage = stage;
 
 function flushMark(tag, extra) {
 
@@ -2080,8 +2088,21 @@ async function main() {
                 await loadScript("rop-worker.js?v=128");   // sync syscall executor (fireSync)
                 await loadScript("p2jb_lk.js?v=128");       // per-fw libkernel_web offsets for rop-worker
                 await loadScript("p2jb_poops.js?v=128");    // Y2JB adapter (sync syscall via rop-worker)
-                await loadScript("p2jb.js?v=128");          // exploit module (unchanged, sync)
-                flushMark("P2JB-LOADED", "adapter+module on poopsploit primitives");
+                // ?sc=1 stops here and hands over to the syscall panel instead.
+                // Everything above this point (primitive, prepare(), libkernel base,
+                // rop-worker, LK offsets, the Y2JB adapter) is exactly what a real run
+                // needs, so the panel tests the SAME executor p2jb.js would use. What it
+                // deliberately does NOT load is p2jb.js - or poops's own engine, which the
+                // early return below already skips. Nothing here can write kernel memory.
+                if (Q.get("sc") === "1") {
+                    await loadScript("bagagwa_probe.js?v=129");
+                    flushMark("SC-PANEL-LOADED",
+                        "executor up; p2jb.js/poops-engine NOT loaded (firmware "
+                        + window.fw_str + ")");
+                } else {
+                    await loadScript("p2jb.js?v=128");          // exploit module (unchanged, sync)
+                    flushMark("P2JB-LOADED", "adapter+module on poopsploit primitives");
+                }
             } catch (e) {
                 /* This reported ONLY through flushMark. Served from a static host there is no
                    server log, so a failure here was completely invisible: the run reached the

@@ -45,4 +45,28 @@ window.P2JB_LK = {
     "12.40": { syscall_wrapper: 0x1AE47, setjmp: 0x1D3D3, longjmp: 0x1D42C, pthread_create: 0x79B0, slot_expect: 0x1981B, thread_list: 0x68218 },
     "12.60": { syscall_wrapper: 0x1AE47, setjmp: 0x1D3D3, longjmp: 0x1D42C, pthread_create: 0x79B0, slot_expect: 0x1981B, thread_list: 0x68218 },
     "12.70": { syscall_wrapper: 0x1AE47, setjmp: 0x1D3D3, longjmp: 0x1D42C, pthread_create: 0x79B0, slot_expect: 0x1981B, thread_list: 0x68218 },
+
+    // group C: 13.40/13.60. READ THIS BEFORE TRUSTING THE FOUR TEXT VALUES.
+    //
+    // thread_list = 0x6C218 is VERIFIED. Source: X1NONs/PSAITO offsets/13.XX/13.60
+    // (declared "X1NON-verified"), vendored byte-identically from X1NON-PSJB. It
+    // also fits the one clean progression this table shows across every group:
+    //     12.00 0x64218  ->  12.40 0x68218  ->  13.60 0x6C218      (+0x4000 per group)
+    //
+    // syscall_wrapper / setjmp / longjmp / slot_expect are EXTRAPOLATED, not RE'd.
+    // 13.60 sits exactly one group-step from 12.40 (see thread_list above), and every
+    // text RVA in this table moves by the same +0x20 when a group changes
+    // (12.00 0x1AE27 -> 12.40 0x1AE47, 0x1D3B3 -> 0x1D3D3, 0x197FB -> 0x1981B), so
+    // each value is 12.40's plus 0x20. NO upstream publishes these: PSAITO and
+    // slopkit2's 13.20 profile both stop at the WebKit/GOT layer, and X1NON-PSJB has
+    // no libkernel_web table at all. This is the only place the numbers could come
+    // from without the 13.60 sprx.
+    //
+    // VERIFY IN ONE COMMAND before trusting a run:
+    //     node tools/lkfind.js <13.60 libkernel_web.sprx> --expect 12.00
+    // Failure modes are benign for a first run, and none of them writes kernel
+    // memory: a wrong slot_expect makes resolveSlot()'s scan find nothing (clean
+    // throw), while a wrong syscall_wrapper/setjmp/longjmp jumps to a bad address and
+    // kills the WebProcess (browser tab, recoverable).
+    "13.60": { syscall_wrapper: 0x1AE67, setjmp: 0x1D3F3, longjmp: 0x1D44C, pthread_create: 0x79B0, slot_expect: 0x1983B, thread_list: 0x6C218 },
 };

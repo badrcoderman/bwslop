@@ -63,7 +63,7 @@ body{
        &burn=1                  DANGER: sprays after every close, PANICKED the kernel in
                                 v73. Do not use. -->
 <a class="btn" id="btnp2jb"
-   href="p2jb.html?go=1&amp;auto=1&amp;trigger=netcontrol&amp;payload=1&amp;v=128"
+   href="p2jb.html?go=1&amp;auto=1&amp;trigger=netcontrol&amp;payload=1&amp;v=129"
    tabindex="0">P2JB</a>
 
 <!-- sockets= is deliberately NOT forced here any more. poops.html's own default is 80
@@ -89,6 +89,24 @@ body{
    href="poops.html?go=1&amp;auto=1&amp;trigger=netcontrol&amp;payload=1&amp;nullfds=1&amp;v=128"
    tabindex="0">Poopsploit</a>
 
+<!-- 13.60 HAS NO KERNEL OFFSETS. Nothing on this page does - see offsets/13.60.js, which
+     documents the absence and why X1NON-PSJB's kernel-data.js must NOT be pasted in.
+     So this entry is the userland half only: it runs the exact same boot as P2JB (WebKit
+     primitive -> prepare() -> libkernel base -> rop-worker -> Y2JB adapter) and then STOPS
+     at a syscall panel instead of loading p2jb.js. Nothing it does can write kernel memory,
+     and every call it makes is a read-only or self-contained one (getpid family, kqueue,
+     pipe2, and AIO/osem reachability with all-zero or throwaway arguments).
+
+     It exists because 13.60 is the firmware poops and p2jb are both patched on, so the
+     only useful question left there is whether the kernel still REACHES these calls at
+     all - which is answerable in one run, non-destructively, before anyone arms Bagagwa.
+     The real UAF is deliberately not wired to a button; see bagagwa_probe.js.
+
+     ?sc=1 is the switch. It is checked in p2jb.html's handoff block, right where the
+     kernel module would otherwise be loaded - one branch, no duplicated boot code. -->
+<a class="btn" id="btnsctest"
+   href="p2jb.html?go=1&amp;sc=1&amp;v=129"
+   tabindex="0">Syscall test</a>
 
 
 <div id="msg"></div>
@@ -130,7 +148,12 @@ body{
 // being read out of 12.02 by an earlier version.
 var RANGES = {
     btnpoops: { lo: 700, hi: 1200, name: "Poopsploit", range: "7.00-12.00" },
-    btnp2jb:  { lo: 1200, hi: 1270, name: "P2JB",       range: "12.00-12.70" }
+    btnp2jb:  { lo: 1200, hi: 1270, name: "P2JB",       range: "12.00-12.70" },
+    // 13.00/13.20 are listed in main.js but still cannot prepare() - their profiles have
+    // no OFFSET_lk__thread_list yet, so find_worker() throws. Only 13.60 has one. The
+    // range is left wide so the entry is reachable on those too: failing at find_worker
+    // with a named reason is a better outcome than a greyed-out button that says nothing.
+    btnsctest:{ lo: 1300, hi: 1360, name: "Syscall test", range: "13.00-13.60" }
 };
 
 (function () {
@@ -163,7 +186,7 @@ var RANGES = {
     if (msg) {
         msg.textContent = usable.length
             ? "firmware " + fw
-            : "firmware " + fw + " — not supported (Poopsploit 7.00-12.00, P2JB 12.00-12.70)";
+            : "firmware " + fw + " — not supported (Poopsploit 7.00-12.00, P2JB 12.00-12.70, Syscall test 13.00-13.60)";
     }
     // focus whichever entry is actually usable
     var first = document.querySelector(".btn:not(.disabled)");
