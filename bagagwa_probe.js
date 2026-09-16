@@ -306,7 +306,7 @@
     /* Never throws: a throw is a RESULT here. The most likely first outcome on a new
      * firmware is resolveSlot() failing to find the parked worker, and the operator has to
      * be able to read that rather than watch the tab die silently. */
-    function S(label, nr, args, expectFail) {
+    function S(label, nr, args, expectFail, quiet) {
         /* A wedge during ANY earlier payload latches W.dead=true in the executor. The
          * error thrown at the end of that spin was already beacons as RW-WEDGE with a
          * shape diagnosis, but the NEXT call would otherwise burn ANOTHER full spin cap
@@ -333,9 +333,12 @@
             var ret = window.syscall(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
             var d = decode(ret, expectFail);
             var ms = Date.now() - t0;
-            out(label, "ret=" + hex(ret) + " enc=" + d.enc
-                + (d.ok ? "" : " " + (d.errName || d.errno)) + "  (" + ms + "ms)",
-                d.ok ? "ok" : "err");
+            /* quiet: the ABI sweep issues dozens of calls whose individual returns are
+             * summarised into one row per argument; a throw is still ALWAYS reported. */
+            if (!quiet)
+                out(label, "ret=" + hex(ret) + " enc=" + d.enc
+                    + (d.ok ? "" : " " + (d.errName || d.errno)) + "  (" + ms + "ms)",
+                    d.ok ? "ok" : "err");
             return { label: label, nr: nr, ok: d.ok, errno: d.errno, errName: d.errName, ret: ret, ms: ms };
         } catch (e) {
             var why = String((e && e.message) || e).slice(0, 110);
@@ -751,6 +754,175 @@
         return { ok: true, summary: wait.errName || "ok" };
     }
 
+    /* T6 -- the aio_multi_wait ABI map. Read-only, and ARMING-SAFE BY CONSTRUCTION.
+     *
+     * Three implementations disagree on this call's argument order -- Bagagwa_chain uses
+     * (instanceId, ids, num, mode), slopkit_ref/PSAITO use (ids, num, ...) -- and a wrong
+     * order fails SILENTLY: mode lands in the wrong register, the shared node is never
+     * linked onto the requests' waiter lists, the array is never freed, and the call still
+     * RETURNS CLEANLY. That reads as "the kernel is patched" when the truth is "we called it
+     * wrong", which is why the order has to be MEASURED before anything is armed.
+     *
+     * THE SAFETY ARGUMENT, spelled out because this is the tile that gets closest to the bug.
+     * The mode-0 corruption needs ONE node linked onto TWO OR MORE requests' waiter lists,
+     * which requires BOTH (a) a valid ids array the kernel actually walks AND (b) num >= 2.
+     * Every call below sets AT MOST TWO registers nonzero:
+     *     reg[i] = pointer to a zero-filled buffer
+     *     reg[j] = 1
+     * with all four others left at 0. Let the kernel's real ids register be I and its real num
+     * register be N. Then:
+     *   * N not in {i,j} -> num = 0   -> rejected before anything is linked
+     *   * N = j          -> num = 1   -> at most ONE request linked, so there is no second
+     *                                   list for a node to be shared with and nothing can
+     *                                   dangle; cleanup unlinks by node->owner and finds it
+     *   * N = i          -> num = the buffer address, and ids is arg j = 1 or a register left
+     *                                   at 0 -- both unmapped user pages, so the FIRST ids
+     *                                   read faults and the walk aborts before any link
+     *                                   (I != N, so I can only be j or a zeroed register)
+     * There is NO assignment of (i, j) that reaches a valid array with num >= 2, and phase 1
+     * is the same argument with reg[j] left at 0. tools/test_abimap.mjs asserts this as a
+     * tripwire: its kernel model latches `armed` on any valid-array-with-num>=2 call and the
+     * suite fails if it ever fires.
+     *
+     * WHAT IT CANNOT DO: it cannot pin `mode` or `timeout`, and it never passes a real request
+     * id, so it cannot prove the shared-node path works -- only what the argument ORDER is.
+     */
+    function pAbiMap() {
+        var REGNAME = ["rdi (arg 1)", "rsi (arg 2)", "rdx (arg 3)", "rcx->r10 (arg 4)", "r8 (arg 5)", "r9 (arg 6)"];
+        var buf, base;
+        try {
+            buf = zeros(malloc(0x70), 0x70);
+        } catch (e) {
+            out("ABI-VERDICT", "cannot allocate the array buffer: " + String((e && e.message) || e).slice(0, 80), "err");
+            return { ok: false, summary: "no buffer" };
+        }
+        function only(k, v) { var a = [0n, 0n, 0n, 0n, 0n, 0n]; a[k] = v; return a; }
+        function pair(i, vi, j, vj) { var a = [0n, 0n, 0n, 0n, 0n, 0n]; a[i] = vi; a[j] = vj; return a; }
+        function nm(r) { return r.ret === undefined ? "threw" : (r.errName || hex(r.ret)); }
+
+        base = S("ABI baseline (all zero)", 0x297, [0n, 0n, 0n, 0n, 0n, 0n], true);
+        if (base.ret === undefined) {
+            out("ABI-VERDICT", "the all-zero baseline threw (" + base.threw + ") -- nothing to compare against", "err");
+            return { ok: false, summary: "baseline threw" };
+        }
+        var e0 = B(base.ret);   // the all-zero baseline, printed alongside phase 1
+
+        /* Phase 1 -- ONE register at a time, pointer-shaped sentinel. 0x1000 is an unmapped
+         * user page, so if the kernel dereferences that argument as the array the copyin
+         * fails and the return MOVES to EFAULT; if the argument is a scalar it either
+         * validates (a different errno) or is not read at all (baseline unchanged). */
+        var deref = [], row1 = [];
+        for (var k = 0; k < 6; k++) {
+            var r = S("ABI arg" + (k + 1) + "=" + hex(0x1000n), 0x297, only(k, 0x1000n), true, true);
+            var fault = r.errName === "EFAULT";
+            if (fault) deref.push(k);
+            row1.push("arg" + (k + 1) + "=" + nm(r));
+        }
+        out("ABI-phase1", "one register at a time (others 0)  baseline=" + nm(base) + " (" + hex(e0) + ")"
+            + "  |  " + row1.join("  "), "dim");
+
+        /* Phase 2 -- the VALID array in one argument and num=1 in another, so the kernel gets
+         * past any num==0 short-circuit and reveals which pair it consumes. Still at most two
+         * nonzero registers, so the safety argument above holds. */
+        var M = [], rows = [];
+        for (var i = 0; i < 6; i++) {
+            M.push([]);
+            var cells = [];
+            for (var j = 0; j < 6; j++) {
+                if (i === j) { M[i].push(null); cells.push("  --  "); continue; }
+                var rr = S("ptr@arg" + (i + 1) + " num1@arg" + (j + 1), 0x297, pair(i, buf, j, 1n), true, true);
+                if (rr.threw === "executor dead") { out("ABI-VERDICT", "executor latched dead mid-sweep", "err"); return { ok: false, summary: "wedge" }; }
+                var n = nm(rr);
+                M[i].push(n);
+                cells.push(n);
+            }
+            rows.push("  arg" + (i + 1) + "=arrayptr : " + cells.join(" "));
+        }
+        out("ABI-phase2", "rows = the argument holding the array pointer, columns = arg1..arg6", "dim");
+        for (var z = 0; z < rows.length; z++) out("ABI-matrix", rows[z], "dim");
+
+        /* Read the matrix RELATIVE TO EACH ROW, never against the baseline. When the
+         * baseline is itself an array fault (ids=NULL gives EFAULT) then merely making the
+         * array valid changes the return, so "differs from the baseline" lights up every
+         * cell of the true row and proves nothing -- it reported five candidate pairs on the
+         * first hardware-shaped run. The signal that survives is the one inside a row: for a
+         * FIXED array argument, num is 0 in every cell but one, so the true ids row is exactly
+         * the row where a single column stands apart from the other four. */
+        var cands = [];
+        for (var ri = 0; ri < 6; ri++) {
+            var tally = {}, order = [];
+            for (var cj = 0; cj < 6; cj++) {
+                var v = M[ri][cj];
+                if (v === null || v === undefined) continue;
+                if (!(v in tally)) { tally[v] = 0; order.push(v); }
+                tally[v]++;
+            }
+            if (order.length !== 2) continue;                        // uniform row: not ids
+            var a = order[0], b = order[1];
+            var odd = tally[a] === 1 ? a : (tally[b] === 1 ? b : null);
+            if (!odd || odd === "EFAULT" || tally[odd] !== 1) continue;
+            for (var oj = 0; oj < 6; oj++)
+                if (oj !== ri && M[ri][oj] === odd) cands.push({ i: ri, j: oj, nm: odd, mode: tally[a] === 1 ? b : a });
+        }
+
+        out("ABI-safety", "arming-safe by construction: at most two registers are nonzero per call, "
+            + "so the real num is 0, 1, or the buffer address -- and whenever it is the buffer "
+            + "address the ids register is 0 or 1, both unmapped, so the walk faults before any "
+            + "link can be made. A valid array is never paired with num >= 2.", "dim");
+
+        if (cands.length === 1) {
+            var w = cands[0];
+            /* Phase 1 finds whichever argument is checked LAST before the array is read, and
+             * that is not always the array itself -- see the two corroborations below. Saying
+             * which end a phase observed is the difference between corroboration and a claim. */
+            var corrob = "";
+            if (deref.length === 1 && deref[0] === w.i)
+                corrob = " Phase 1 corroborates from the other direction: 0x1000 in argument " + (w.i + 1)
+                    + " alone flipped the return to EFAULT, i.e. that IS the argument the kernel dereferences.";
+            else if (deref.length === 1 && deref[0] === w.j)
+                corrob = " Phase 1 corroborates from the OTHER END: its only EFAULT came from argument " + (w.j + 1)
+                    + ", the argument the sweep calls num. A bad pointer there is merely a large num, which gets "
+                    + "past the num==0 rejection and lets the ARRAY check be the thing that faults -- so both "
+                    + "phases point at the same pair from opposite sides.";
+            else if (deref.length > 1)
+                corrob = " Phase 1 could not isolate anything (all " + deref.length + " arguments faulted when given "
+                    + "0x1000, because an absent array faults too), so this rests on the sweep alone.";
+            else if (deref.length === 1)
+                corrob = " Phase 1 pointed at argument " + (deref[0] + 1) + " instead, which does not line up with "
+                    + "this pair -- treat the sweep result as unconfirmed.";
+            out("ABI-VERDICT", "ids = argument " + (w.i + 1) + " [" + REGNAME[w.i] + "], num = argument "
+                + (w.j + 1) + " [" + REGNAME[w.j] + "]. Row " + (w.i + 1) + " is the only one where a single "
+                + "column stands apart ('" + w.nm + "' vs '" + w.mode + "' in the other four), which is "
+                + "what a nonzero num looks like when num is 0 in every other cell of that row."
+                + corrob + " Inference from one sweep, not a table lookup.", cands[0] && corrob.indexOf("unconfirmed") < 0 ? "ok" : "warn");
+            notify("bagagwa ABI: ids=arg" + (w.i + 1) + " num=arg" + (w.j + 1) + " (" + w.nm + ")");
+            return { ok: true, summary: "ids=arg" + (w.i + 1) + " num=arg" + (w.j + 1) };
+        }
+        if (cands.length > 1) {
+            out("ABI-VERDICT", cands.length + " rows each have a single odd column ("
+                + cands.map(function (x) { return "arg" + (x.i + 1) + "=array+arg" + (x.j + 1) + "=num -> " + x.nm; }).join("; ")
+                + ") -- more than one argument pair behaves like (array, num), most likely because the "
+                + "kernel dereferences another argument too. Do NOT pick one from this alone.", "warn");
+            return { ok: false, summary: "ambiguous" };
+        }
+        if (deref.length === 1) {
+            out("ABI-VERDICT", "argument " + (deref[0] + 1) + " [" + REGNAME[deref[0]] + "] is the argument the "
+                + "kernel DEREFERENCES last -- 0x1000 there alone reached EFAULT while every other "
+                + "single-argument change left the return at " + nm(base) + ". On an ids-first kernel that IS "
+                + "the ids array, but a bad pointer in a count slot would equally get past a num==0 rejection "
+                + "and let the array check fault, so this does not order the pair by itself, and the sweep "
+                + "produced no row to cross-check it. Do not arm on this.", "warn");
+            return { ok: false, summary: "array only" };
+        }
+        out("ABI-VERDICT", "INCONCLUSIVE. No single-argument change produced EFAULT and no row has a "
+            + "single odd column relative to its own baseline " + nm(base) + ", so the kernel "
+            + "rejects this argument set before it touches the array in ANY position -- it may want "
+            + "an instance handle, or a num domain we have not guessed. The matrix above is the raw "
+            + "evidence; do NOT arm on a guess.", "warn");
+        notify("bagagwa: ABI map inconclusive on " + FW);
+        return { ok: false, summary: "inconclusive" };
+    }
+
     /* T4 -- osem. Bagagwa's conversion targets osem's 32-bit refcount at +0x54, the same
      * width as the AIO decrement, so if osem is unreachable too the chain has no target.
      *
@@ -908,6 +1080,11 @@
                 + "waiter list, so this cannot arm the UAF. THE decisive test.",
         },
         {
+            id: "abimap", label: "ABI map", run: pAbiMap,
+            desc: "Read-only and arming-safe by construction. Finds which argument is the ids "
+                + "array and which is num. num never reaches 2 with a valid array.",
+        },
+        {
             id: "osem", label: "osem", run: pOsem,
             desc: "osem_create / open / close / delete. The 32-bit refcount at +0x54 is the "
                 + "chain's intended target.",
@@ -1053,8 +1230,11 @@
      *    puts an instanceId first (instanceId, ids, num, mode). Call it the wrong way and
      *    the mode lands in the wrong register, num is not what you think, the shared-node
      *    link never happens, the array is never freed -- and the call still RETURNS
-     *    CLEANLY. A null result would read as "the kernel is patched" when the truth is
-     *    "we called it wrong". Settle it from the AIO reach raw returns first.
+ *    CLEANLY. A null result would read as "the kernel is patched" when the truth is
+ *    "we called it wrong". The ABI map tile above settles the (ids, num) ORDER from
+ *    measurement -- and note that is still not the whole call: it cannot pin `mode` or
+ *    `timeout`, and it never passes a real request id, so it does not prove the
+ *    shared-node path works either. An armed call needs all of that.
      *
      * 2. THERE IS NO DISARM. On p2jb the equivalent mistake had a recovery path. Here the
      *    cleanup at 0x805c0da1 unlinks by node->owner and only detaches from the LAST
