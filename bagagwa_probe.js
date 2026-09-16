@@ -31,12 +31,25 @@
  *
  * ERRNO ENCODING -- READ BEFORE TRUSTING A VERDICT
  * ------------------------------------------------
- * window.syscall() returns the RAW 64-bit rax from syscall_wrapper (mov r10,rcx; syscall;
- * ret). We have not confirmed on hardware which error convention 13.60 uses, so every
- * call logs its raw word and the decode is offered as a HEURISTIC, labelled "enc=".
- * -errno means the high word is 0xFFFFFFFF with a negative low word, which is what
- * p2jb_poops.js assumes (create_pipe tests the low 32 bits for non-zero). enc=raw with a
- * small positive value means the call succeeded.
+ * window.syscall() returns the RAW 64-bit rax from syscall_wrapper, and that wrapper is
+ * `mov r10,rcx; syscall; ret` (signature 49 89 ca 0f 05 c3, p2jb_lk.js): a bare svc shim
+ * with NO -1 conversion. On FreeBSD's raw ABI the errno is left IN rax and failure is
+ * signalled by CF -- which `syscall; ret` neither clears nor exports. So a small positive
+ * rax is AMBIGUOUS: it can be a real return value or an errno.
+ *
+ * That ambiguity is not cosmetic. A patched aio_multi_wait returns ENOSYS (78 = 0x4e); a
+ * decoder that only understands the -errno shape reads 0x4e as a small positive SUCCESS and
+ * prints "aio_multi_wait REACHABLE" on the one firmware where the chain is dead. Two
+ * things resolve it and BOTH are used below:
+ *
+ *   1. T0 (Syscall convention) MEASURES it, from close() on a bad fd -- a call that cannot
+ *      succeed, so whatever rax holds IS the error form -- plus an out-of-range syscall
+ *      number, which must be ENOSYS and therefore shows the exact ENOSYS encoding.
+ *      Result is kept in CONV for the whole run.
+ *   2. expectFail, passed by the caller for calls whose arguments make success impossible
+ *      (aio_multi_wait with num=0). If such a call cannot have succeeded then rax is the
+ *      error indication regardless of convention, which is what makes T3 safe even before
+ *      T0 has run.
  *
  * FreeBSD errno numbering -- in particular ENOSYS = 78, NOT 38, and not ENOSPC. 78 is the
  * single most important value here: it means the syscall does not exist in this kernel,
@@ -72,17 +85,50 @@
         } catch (e) { return String(v); }
     }
 
-    function decode(ret) {
+    /* Which error convention syscall_wrapper uses, as MEASURED by T0. "unknown" until
+     * then -- and nothing below may claim to identify an errno NUMBER while it is unknown. */
+    var CONV = "unknown";        // "raw" | "converted" | "minus1" | "unknown"
+    var ERRNO_MAX = 0x6D;        // high-water mark of FreeBSD errno values
+
+    function decode(ret, expectFail) {
         var r;
         try { r = BigInt(ret); } catch (e) { return { ok: false, errno: -1, enc: "unparsed" }; }
         var lo = Number(BigInt.asIntN(32, r));
         var hi = Number((r >> 32n) & 0xFFFFFFFFn);
+        /* Plain -1: pthread-style. The errno lives in a slot we cannot read, so the NUMBER
+         * is unrecoverable. Must be tested BEFORE the -errno shape, which would otherwise
+         * report this as EPERM (n = -(-1) = 1) -- a confident wrong answer. */
+        if (hi === 0xFFFFFFFF && lo === -1)
+            return { ok: false, errno: -1, errName: "?", enc: "-1 (errno elsewhere)" };
         if (hi === 0xFFFFFFFF && lo < 0) {
             var n = -lo;
             return { ok: false, errno: n, errName: ERRNO[n] || ("errno" + n), enc: "-errno" };
         }
+        if (r >= 0n && r <= BigInt(ERRNO_MAX)) {
+            var sv = Number(r);
+            /* A call that CANNOT have succeeded: rax is the error indication under either
+             * raw convention, so the value is the errno itself. 0 is excluded -- a call that
+             * returns 0 has succeeded, not failed with "errno 0". */
+            if (expectFail && sv > 0)
+                return { ok: false, errno: sv, errName: ERRNO[sv] || ("errno" + sv), enc: "errno-raw" };
+            return { ok: true, val: r, enc: "raw" };
+        }
         if (r >= 0n && r <= 0xFFFFFFFFn) return { ok: true, val: r, enc: "raw" };
         return { ok: true, val: r, enc: "raw-wide" };
+    }
+
+    /* Narration-only helper. decode() stays strict, because a call we have NOT pre-judged
+     * may legitimately return 22 as a value (a handle, an fd). But once T0 has shown the raw
+     * convention, a small positive return from a call we can see FAILED -- e.g. osem_close on
+     * a handle that create never produced -- is an errno, and naming it is the difference
+     * between "close=0x3" and "close=0x3 (ESRCH)". */
+    function errnoHint(ret) {
+        try {
+            var b = BigInt(ret);
+            if (CONV === "raw" && b > 0n && b <= BigInt(ERRNO_MAX))
+                return ERRNO[Number(b)] || ("errno" + b);
+        } catch (e) { }
+        return null;
     }
 
     /* ============================================================ the panel */
@@ -260,7 +306,7 @@
     /* Never throws: a throw is a RESULT here. The most likely first outcome on a new
      * firmware is resolveSlot() failing to find the parked worker, and the operator has to
      * be able to read that rather than watch the tab die silently. */
-    function S(label, nr, args) {
+    function S(label, nr, args, expectFail) {
         /* A wedge during ANY earlier payload latches W.dead=true in the executor. The
          * error thrown at the end of that spin was already beacons as RW-WEDGE with a
          * shape diagnosis, but the NEXT call would otherwise burn ANOTHER full spin cap
@@ -275,11 +321,17 @@
             }
         } catch (e) { }
         var a = (args || []).slice(0, 6);
-        while (a.length < 6) a.push(undefined);
+        /* Zero-fill EVERY argument register; do NOT leave them undefined. The chain pops a
+         * register only when it is defined, so an undefined argument keeps whatever the
+         * PREVIOUS chain left there -- and a stale register read as a pointer is exactly how
+         * a probe manufactures a fake EFAULT. The first 13.60 run printed osem_open=0xe
+         * (EFAULT) on a one-argument call for precisely this reason: its second register
+         * still held a pointer from an earlier call. */
+        while (a.length < 6) a.push(0n);
         var t0 = Date.now();
         try {
             var ret = window.syscall(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
-            var d = decode(ret);
+            var d = decode(ret, expectFail);
             var ms = Date.now() - t0;
             out(label, "ret=" + hex(ret) + " enc=" + d.enc
                 + (d.ok ? "" : " " + (d.errName || d.errno)) + "  (" + ms + "ms)",
@@ -488,6 +540,77 @@
         return { ok: true, summary: "slot_expect " + hex(BigInt(slotExpect)) };
     }
 
+    /* T0 -- which error convention does syscall_wrapper use? MEASURED, not assumed.
+     *
+     * Every errno-shaped verdict in this panel is read through this answer, and getting it
+     * wrong in one direction is catastrophic: a patched aio_multi_wait returns ENOSYS
+     * (0x4e), and a decoder that only understands the -errno shape reports 0x4e as a small
+     * positive SUCCESS -- i.e. "the chain is alive" on the one firmware where it is dead.
+     *
+     * Three read-only calls, each chosen so the result is not a judgement call:
+     *   close(0x7fffffff)  MUST fail with EBADF -- whatever rax holds IS the error form.
+     *                      raw => 0x9      converted => -9 (0xFFFFFFFFFFFFFFF7)
+     *                      plain -1 => 0xFFFFFFFFFFFFFFFF (errno kept elsewhere)
+     *   syscall 0x7ff      out of range, MUST be ENOSYS. Gives the exact ENOSYS encoding T3
+     *                      keys on. The kernel bounds-checks the number and returns ENOSYS;
+     *                      it cannot dispatch, allocate or write.
+     *   getpid             MUST succeed -- the control that says the chain ran at all.
+     */
+    function pConvention() {
+        var ctl = S("getpid (control)", 0x014, []);
+        /* Both are calls that CANNOT succeed, so their returns are labelled as errnos even
+         * though the convention is not yet known -- which is the whole basis of the test. */
+        var bad = S("close(0x7fffffff) -- must fail EBADF", 0x006, [0x7FFFFFFFn], true);
+        var nx = S("syscall 0x7ff -- must fail ENOSYS", 0x7FF, [], true);
+
+        if (ctl.threw || bad.threw || nx.threw) {
+            out("T0-VERDICT", "could not measure the convention -- " + (ctl.threw || bad.threw || nx.threw)
+                + ". Every errno-shaped verdict below is UNVERIFIED.", "warn");
+            return { ok: false, summary: "threw" };
+        }
+
+        var br = B(bad.ret), nv = B(nx.ret);
+        function U(x) { return BigInt.asUintN(64, x); }
+
+        if (br === 0x9n) CONV = "raw";
+        else if (br === U(-9n)) CONV = "converted";
+        else if (br === 0xFFFFFFFFFFFFFFFFn) CONV = "minus1";
+
+        var enosysShape = (nv === 0x4En) ? "0x4e"
+            : (nv === U(-78n)) ? "0xFFFFFFFFFFFFFFB2 (-78)"
+                : (nv === 0xFFFFFFFFFFFFFFFFn) ? "0xFFFFFFFFFFFFFFFF (-1)" : hex(nv);
+
+        if (CONV === "raw") {
+            out("T0-VERDICT", "RAW errno convention. syscall_wrapper is a bare syscall;ret, so the "
+                + "kernel's errno lands in rax with no -1 conversion: close(bad fd)=" + hex(br)
+                + " (EBADF) and ENOSYS reads " + enosysShape + ". T3's ENOSYS test is therefore "
+                + "valid, and a PATCHED aio_multi_wait would read " + enosysShape + ".", "ok");
+            notify("bagagwa T0 raw errno convention; ENOSYS=" + enosysShape);
+            return { ok: true, summary: "raw (ENOSYS=" + enosysShape + ")" };
+        }
+        if (CONV === "converted") {
+            out("T0-VERDICT", "CONVERTED convention: close(bad fd) returned " + hex(br)
+                + " (-errno in rax). T3's -errno decode is valid as written -- and the corollary "
+                + "is that an AIO refusal must then read " + hex(U(-22n)) + " (-EINVAL), NOT a "
+                + "small positive value. Out-of-range syscall read " + enosysShape + ".", "ok");
+            notify("bagagwa T0 converted errno convention on " + FW);
+            return { ok: true, summary: "converted" };
+        }
+        if (CONV === "minus1") {
+            out("T0-VERDICT", "PLAIN -1 convention: close(bad fd) returned 0xFFFFFFFFFFFFFFFF and the "
+                + "errno is kept ELSEWHERE (a libc/thread errno slot). The errno NUMBER is not "
+                + "recoverable from rax, so this panel CANNOT distinguish ENOSYS from a legitimate "
+                + "small return -- read the RAW returns on T3, do not trust an ENOSYS verdict. "
+                + "Out-of-range syscall read " + enosysShape + ".", "err");
+            notify("bagagwa T0: -1 with errno elsewhere on " + FW + " -- ENOSYS unreadable");
+            return { ok: false, summary: "minus1" };
+        }
+        out("T0-VERDICT", "UNEXPECTED: close(0x7fffffff) returned " + hex(br) + " and syscall 0x7ff "
+            + "returned " + enosysShape + " -- neither convention fits. Treat every errno-shaped "
+            + "verdict below as unverified.", "warn");
+        return { ok: false, summary: "unknown" };
+    }
+
     /* T1 -- the identity family. p2jb's own preflight uses exactly this set to prove the
      * libkernel call path, and it is the cheapest positive control there is: if these come
      * back with plausible values then the chain, the base derivation and the worker hijack
@@ -521,27 +644,50 @@
 
         var kq = S("kqueue", 0x16A, []);
         total++;
-        if (kq.ok) {
-            ok++;
+        if (kq.ret !== undefined && kq.ok) {
             var fd = Number(BigInt.asIntN(32, kq.ret));
-            out("T2-kqueue", "fd=" + fd + (fd >= 0 ? " -- a real descriptor, closed again" : " -- not a sane fd"),
-                fd >= 0 ? "ok" : "warn");
-            if (fd >= 0) S("close(kqueue)", 0x006, [BigInt(fd)]);
+            /* PROVE it is a descriptor before counting it. Under a raw errno convention a
+             * FAILED kqueue also looks like a small positive number (EMFILE = 24, EMFILE is
+             * exactly what this call runs into when p2jb's kqueue leak has drained the
+             * limit), and close() is the definitive test: it returns 0 only for a descriptor
+             * that really exists. Counting 24 as "a real fd" and closing it would spend a
+             * slot on nothing and turn a failure into a green line. */
+            var cl = (fd >= 0) ? S("close(kqueue)", 0x006, [BigInt(fd)]) : null;
+            var kqReal = !!(cl && cl.ret !== undefined && B(cl.ret) === 0n);
+            out("T2-kqueue", "fd=" + fd + (kqReal
+                ? " -- proven a real descriptor (close returned 0), closed again"
+                : " -- close() did NOT return 0, so " + hex(kq.ret) + " was an errno, not a descriptor"),
+                kqReal ? "ok" : "warn");
+            if (kqReal) ok++;
         }
 
         try {
             var pfd = zeros(malloc(8), 8);
             var pr = S("pipe2", 0x2AF, [pfd, 0n]);
             total++;
-            if (pr.ok) {
-                ok++;
+            /* pipe2 returns 0 on success, and 0 can never be an errno under ANY convention,
+             * so this one needs no ambiguity handling -- but the fd PAIR it wrote does, so the
+             * closes are checked the same way as kqueue's. */
+            var pipeReal = (pr.ret !== undefined) && B(pr.ret) === 0n;
+            if (pipeReal) {
                 if (window.read_buffer) {
                     var buf = window.read_buffer(pfd, 8);
                     var rd = new Int32Array(buf.buffer, buf.byteOffset, 2);
-                    out("T2-pipe2", "rfd=" + rd[0] + " wfd=" + rd[1], "ok");
-                    if (rd[0] >= 0) S("close(pipe r)", 0x006, [BigInt(rd[0])]);
-                    if (rd[1] >= 0) S("close(pipe w)", 0x006, [BigInt(rd[1])]);
+                    var cr = S("close(pipe r)", 0x006, [BigInt(rd[0])]);
+                    var cw = S("close(pipe w)", 0x006, [BigInt(rd[1])]);
+                    var bothReal = (cr.ret !== undefined && B(cr.ret) === 0n)
+                        && (cw.ret !== undefined && B(cw.ret) === 0n);
+                    out("T2-pipe2", "rfd=" + rd[0] + " wfd=" + rd[1] + (bothReal
+                        ? " -- both closes returned 0, the pair is genuine"
+                        : " -- but a close() did not return 0; the fds may be stale"),
+                        bothReal ? "ok" : "warn");
+                    if (bothReal) ok++;
+                } else {
+                    ok++;
                 }
+            } else if (pr.ret !== undefined) {
+                out("T2-pipe2", "refused: " + hex(pr.ret) + (pr.errName ? " (" + pr.errName + ")" : "")
+                    + " -- pipe2 returns 0 on success", "warn");
             }
         } catch (e) {
             out("T2-pipe2", "THREW " + String((e && e.message) || e).slice(0, 90), "err");
@@ -564,8 +710,8 @@
      * print a green result on a firmware where aio_init answers but the one call the chain
      * needs is gone, which is the most expensive wrong answer this panel can give. */
     function pAio() {
-        var init = S("aio_init", 0x29E, [0n]);
-        var wait = S("aio_multi_wait(all-zero)", 0x297, [0n, 0n, 0n, 0n, 0n]);
+        var init = S("aio_init", 0x29E, [0n], /*expectFail*/ true);
+        var wait = S("aio_multi_wait(all-zero)", 0x297, [0n, 0n, 0n, 0n, 0n], /*expectFail*/ true);
 
         if (wait.errName === "ENOSYS") {
             out("T3-VERDICT", "BAGAGWA DEAD -- aio_multi_wait is ENOSYS on " + FW
@@ -581,9 +727,25 @@
             notify("bagagwa: aio_multi_wait threw on " + FW);
             return { ok: false, summary: "threw" };
         }
-        out("T3-VERDICT", "aio_multi_wait REACHABLE (" + hex(wait.ret)
-            + (wait.errName ? " " + wait.errName : "")
-            + "). The chain is still reachable in principle -- but this did NOT settle the ABI.", "ok");
+        /* T0 proved the errno is kept OUTSIDE rax. ENOSYS is then indistinguishable from any
+         * other refusal, and claiming "reachable" off a bare -1 would be a guess dressed as a
+         * measurement -- the exact failure this panel exists to avoid. */
+        if (CONV === "minus1" && wait.errName === "?") {
+            out("T3-VERDICT", "CANNOT DETERMINE -- T0 established the plain -1 convention, so the "
+                + "errno lives outside rax and ENOSYS cannot be told apart from any other refusal. "
+                + "All this executor can give you is the raw return " + hex(wait.ret) + ". Do NOT "
+                + "read this as reachable.", "warn");
+            chip(elVerdict, "", "AIO reach indeterminate");
+            notify("bagagwa: AIO reach indeterminate on " + FW + " (errno unreadable from rax)");
+            return { ok: false, summary: "indeterminate" };
+        }
+        out("T3-VERDICT", "aio_multi_wait REACHABLE -- answered " + hex(wait.ret)
+            + (wait.errName ? " (" + wait.errName + ")" : "") + ", NOT ENOSYS. All-zero "
+            + "arguments are an invalid argument set, so a refusal here proves the SYSCALL "
+            + "EXISTS and rejected them; a PATCHED kernel would have returned "
+            + (CONV === "raw" ? "0x4e" : CONV === "converted" ? "-78" : "ENOSYS")
+            + " instead. The chain is reachable in principle -- this still does NOT settle "
+            + "the ABI, which is what the armed call needs.", "ok");
         chip(elVerdict, "ok", "aio_multi_wait reachable");
         notify("bagagwa: aio_multi_wait reachable on " + FW);
         return { ok: true, summary: wait.errName || "ok" };
@@ -599,23 +761,41 @@
         try {
             var name = window.alloc_string("bwp_probe");
             var attr = zeros(malloc(0x20), 0x20);
+            /* Deliberately NOT expectFail: a create with a fresh name and a zeroed attr
+             * legitimately CAN succeed, and its return may be a real handle. */
             var cr = S("osem_create(name,attr)", 0x225, [name, attr]);
-            if (!cr.ok) {
-                out("T4-VERDICT", "osem_create refused (" + (cr.errName || cr.ret) + "). "
-                    + "The ABI may simply be the other shape -- try (name,0,1,1,0) before concluding.", "warn");
-                return { ok: false, summary: cr.errName || "refused" };
+            if (cr.ret === undefined) {
+                out("T4-VERDICT", "THREW " + cr.threw, "err");
+                return { ok: false, summary: "threw" };
             }
             var h = cr.ret;
-            out("T4-create", "handle=" + hex(h), "ok");
-            S("osem_open", 0x227, [h]);
-            S("osem_close", 0x228, [h]);
-            var del = S("osem_delete", 0x226, [h]);
-            out("T4-VERDICT", del.ok
-                ? "osem create/open/close/delete all answered -- the refcount target exists."
-                : "created, but delete refused -- that is itself information (see the raw return).",
-                del.ok ? "ok" : "warn");
-            notify("bagagwa T4 osem reachable");
-            return { ok: true, summary: "reachable" };
+
+            /* The create return is AMBIGUOUS on its own. Under a raw convention a small
+             * positive rax is either a handle or an errno, and 0x16 = 22 could be either.
+             * The follow-ups settle it: a GENUINE handle does not give ESRCH on close. The
+             * first 13.60 run read create=0x16, open=0xe, close=0x3, delete=0x3 -- ESRCH is
+             * "no such object", which means 0x16 was never a handle. */
+            var o = S("osem_open", 0x227, [h]);
+            var c = S("osem_close", 0x228, [h]);
+            var d = S("osem_delete", 0x226, [h]);
+            var realHandle = (c.ret !== undefined) && B(c.ret) === 0n;
+
+            if (realHandle) {
+                out("T4-create", "handle=" + hex(h) + " (proven: close returned 0)", "ok");
+                out("T4-VERDICT", "osem create/open/close/delete all answered -- the 32-bit "
+                    + "refcount at +0x54 is a reachable target.", "ok");
+                notify("bagagwa T4 osem reachable");
+                return { ok: true, summary: "reachable" };
+            }
+
+            out("T4-VERDICT", "the family EXISTS (it answered instead of returning ENOSYS) but "
+                + "create did not yield a usable handle: create=" + hex(h)
+                + ", close=" + hex(c.ret) + " (" + (c.ret === undefined ? "threw" : (c.errName || errnoHint(c.ret) || "value"))
+                + ") where a real handle must close with 0, so " + hex(h) + " was an errno, not "
+                + "a handle. The ABI is unsettled here too -- Bagagwa_chain calls (name, attr), "
+                + "PSAITO calls (name,0,1,1,0). Do NOT read this as \"osem is patched\".", "warn");
+            notify("bagagwa T4 osem answered but refused");
+            return { ok: true, summary: "present, no handle" };
         } catch (e) {
             out("T4-VERDICT", "THREW " + String((e && e.message) || e).slice(0, 90), "err");
             return { ok: false, summary: "threw" };
@@ -706,6 +886,11 @@
             id: "calibrate", label: "Calibrate LK row", run: pCalibrate,
             desc: "Read-only. Measures the REAL slot_expect from the parked worker stack (the "
                 + "extrapolated 13.60 value was wrong) and patches the row live. Run this first.",
+        },
+        {
+            id: "convention", label: "Syscall convention", run: pConvention,
+            desc: "Read-only. Determines how this kernel reports errors, from close() on a bad "
+                + "fd plus an out-of-range syscall number. Run before trusting any errno verdict.",
         },
         {
             id: "identity", label: "Identity", run: pIdentity,
@@ -834,7 +1019,9 @@
     try { lm = window.P2JB_LK && window.P2JB_LK[FW]; } catch (e) { }
     chip(elVerdict, lm ? "" : "bad", lm ? "LK row present" : "no LK row for " + FW);
     paint("Bagagwa panel up on " + FW + ". Userland succeeded; nothing below writes kernel memory.", "sec");
-    paint("errno 78 = ENOSYS. If AIO reach reports it, the chain is dead on this firmware.", "dim");
+    paint("Syscall convention is MEASURED first: on a raw syscall;ret wrapper a patched "
+        + "aio_multi_wait returns 0x4e, which reads as a small positive value. Never trust an "
+        + "ENOSYS verdict before T0 has run.", "dim");
     paint("", null);
 
     /* Restore the previous run's tail, if there was one -- this is how a crashed run is

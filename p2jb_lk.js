@@ -86,10 +86,23 @@ window.P2JB_LK = {
     //    prefers this anchor explicitly.
     //  * 0x1FD01 also frame-validated on the stack = PSAITO's worker_wait_return.
     //    Second anchor; recorded for cross-reference, not used by the executor.
-    //  * syscall_wrapper/setjmp/longjmp are still delta-derived (anchor + the fixed
-    //    12.x-group deltas +0x162C/+0x3BB8/+0x3C11), NOT yet proven on hardware: the
-    //    first calibrated run hijacked through the WRONG slot (0x2198d, the thread-entry
-    //    trampoline), so these three remain the one unverified leg. If Identity fails
-    //    after a successful calibrate, these are the suspects.
+    //  * syscall_wrapper/setjmp/longjmp were delta-derived (anchor + the fixed
+    //    12.x-group deltas +0x162C/+0x3BB8/+0x3C11).
+    //
+    // HARDWARE RESULT, calibrated run (13.60 console, 2026-09): ALL FOUR ARE NOW
+    // VERIFIED, not extrapolated.
+    //  * The 0x2198d pick was abandoned (thread-entry trampoline); with the anchor-first
+    //    picker, the hijack landed at stack+0x7fc28 -- exactly the frame slot_expect
+    //    0x1988B predicts (12.00 parks at 0x7fc18). fired=19.
+    //  * syscall_wrapper = 0x1AEB7 is PROVEN: 19 chains executed and returned correct
+    //    values (getpid=0x4f, getppid=0x34, getuid/getgid=0x1, kqueue=fd 7, pipe2 wrote
+    //    rfd 7 / wfd 8, close -> 0). A wrong wrapper address would have killed the
+    //    WebProcess on the first call.
+    //  * setjmp 0x1D443 / longjmp 0x1D49C are PROVEN too: fireSync runs "big" mode
+    //    through the manual jmp_buf on EVERY call, so 19 clean fires exercise both.
+    //  * The poison self-check (write64(retval, C0FFEEDEADBEEF) then getpid) came back as
+    //    pid 0x4f, so the return slot is genuinely written by this chain.
+    // The +0x90 stub shift and the +0x20 group step both hold on real hardware; this row
+    // no longer needs the "one unverified leg" caveat.
     "13.60": { syscall_wrapper: 0x1AEB7, setjmp: 0x1D443, longjmp: 0x1D49C, pthread_create: 0x79B0, slot_expect: 0x1988B, thread_list: 0x6C218 },
 };
