@@ -136,10 +136,16 @@ const check = (name, cond, extra) => {
     check("1: T3 REACHABLE", log.includes("aio_multi_wait REACHABLE"));
     check("1: T3 names EINVAL", log.includes("(EINVAL)"));
     check("1: T3 says it did not settle the ABI", log.includes("does NOT settle the ABI"));
-    check("1: osem does NOT claim a refcount target from a bogus handle",
-        !log.includes("refcount at +0x54 is a reachable target"));
+    /* Assert on the SEMANTIC marker, not the surrounding prose: a negative check written
+     * against a whole sentence silently stops testing anything the moment the wording is
+     * edited, which is exactly what happened here. */
+    check("1: osem does NOT claim a reachable target from a bogus handle",
+        !log.includes("REACHABLE KERNEL TARGET"));
     check("1: osem explains 0x16 was an errno, not a handle", log.includes("was an errno, not"));
     check("1: osem still reports the family EXISTS", log.includes("family EXISTS"));
+    check("1: osem tried the documented 5-arg shape FIRST",
+        log.indexOf("osem_create(name,0,1,1,0)") < log.indexOf("osem_create(name,attr,0,0,0)"));
+    check("1: osem tried BOTH shapes before concluding", log.includes("NEITHER create shape"));
 }
 
 /* 2. raw convention, firmware PATCHED -- the regression that mattered.
@@ -187,9 +193,12 @@ const check = (name, cond, extra) => {
 {
     const { log } = await run("osem-correct", {});
     check("6: osem_close 0x3 decodes as ESRCH", log.includes("ESRCH"));
-    check("6: no green refcount verdict", !log.includes("refcount at +0x54 is a reachable target"));
+    check("6: no green refcount verdict", !log.includes("REACHABLE KERNEL TARGET"));
     const p = await run("osem-real", { "0x225": 0x22n, "0x228": 0x0n, "0x227": 0x0n, "0x226": 0x0n });
-    check("6b: a real handle (close returns 0) IS accepted", p.log.includes("refcount at +0x54 is a reachable target"));
+    check("6b: a real handle (close returns 0) IS accepted",
+        p.log.includes("REACHABLE KERNEL TARGET") && p.log.includes("PROVEN, close returned 0"));
+    check("6c: it stops at the first shape that produces a real handle",
+        p.log.indexOf("osem_create(name,attr,0,0,0)") < 0, p.log);
 }
 
 console.log(fails ? `\n${fails} check(s) FAILED` : "\nall convention scenarios pass");

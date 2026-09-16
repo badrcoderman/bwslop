@@ -926,47 +926,65 @@
     /* T4 -- osem. Bagagwa's conversion targets osem's 32-bit refcount at +0x54, the same
      * width as the AIO decrement, so if osem is unreachable too the chain has no target.
      *
-     * The ABI here is NOT settled either: Bagagwa_chain calls (name, attr) while PSAITO's
-     * probe calls (name, 0, 1, 1, 0). We use (name, attr) and print the raw return, so one
-     * run tells you which the kernel accepted instead of us guessing. */
+     * THE ABI HERE IS NOT SETTLED, and the difference is not cosmetic. Bagagwa_chain calls
+     * (name, attr); PSAITO's bagagwa_uaf_1320.js calls the FIVE-argument
+     * (name, 0, 1, 1, 0). We originally sent (name, attr) -- two arguments, which zero-fills
+     * the rest to (name, ptr, 0, 0, 0). If those two 1s are a required mode/type pair, then
+     * the 0x16 the first 13.60 run recorded was OUR bad call, not a kernel refusal, and
+     * reading it as "osem is patched" would have been exactly the class of mistake this
+     * panel exists to prevent. So try the documented shape first, fall back to ours, and
+     * report which one answered.
+     *
+     * The create return is AMBIGUOUS on its own: under the raw convention a small positive
+     * rax is either a handle or an errno, and 0x16 = 22 could be either. The follow-ups
+     * settle it -- a GENUINE handle does not give ESRCH on close -- so a shape is accepted
+     * only when close() returns 0, never on the strength of the create return. */
     function pOsem() {
         try {
             var name = window.alloc_string("bwp_probe");
             var attr = zeros(malloc(0x20), 0x20);
-            /* Deliberately NOT expectFail: a create with a fresh name and a zeroed attr
-             * legitimately CAN succeed, and its return may be a real handle. */
-            var cr = S("osem_create(name,attr)", 0x225, [name, attr]);
-            if (cr.ret === undefined) {
-                out("T4-VERDICT", "THREW " + cr.threw, "err");
-                return { ok: false, summary: "threw" };
+            var SHAPES = [
+                { tag: "osem_create(name,0,1,1,0)", args: [name, 0n, 1n, 1n, 0n], from: "PSAITO 13.20" },
+                { tag: "osem_create(name,attr,0,0,0)", args: [name, attr, 0n, 0n, 0n], from: "Bagagwa_chain" },
+            ];
+            var tried = [];
+
+            for (var si = 0; si < SHAPES.length; si++) {
+                var cr = S(SHAPES[si].tag, 0x225, SHAPES[si].args);
+                if (cr.ret === undefined) { tried.push(SHAPES[si].tag + "=threw"); continue; }
+                var h = cr.ret;
+                var o = S("osem_open", 0x227, [h]);
+                var c = S("osem_close", 0x228, [h]);
+                var d = S("osem_delete", 0x226, [h]);
+                var real = (c.ret !== undefined) && B(c.ret) === 0n;
+                tried.push(SHAPES[si].tag + "=" + hex(h));
+                if (!real) {
+                    /* Not a handle. Say why before moving on, so the log shows the reasoning
+                     * rather than just two creates and one verdict. */
+                    out("T4-create", "shape '" + SHAPES[si].tag + "' returned " + hex(h) + " but close gave "
+                        + hex(c.ret) + " (" + (c.ret === undefined ? "threw" : (c.errName || errnoHint(c.ret) || "value"))
+                        + "), not 0 -- so " + hex(h) + " was an errno, not a handle"
+                        + (si + 1 < SHAPES.length ? "; trying the other shape" : ""), "warn");
+                    continue;
+                }
+                out("T4-create", "handle=" + hex(h) + " via '" + SHAPES[si].tag + "' (" + SHAPES[si].from
+                    + ") -- PROVEN, close returned 0", "ok");
+                out("T4-VERDICT", "osem create/open/close/delete all answered and the handle is real: "
+                    + "the 32-bit refcount at +0x54 is a REACHABLE KERNEL TARGET, and kernel-side "
+                    + "allocation in this zone works from our executor. That is the prerequisite for "
+                    + "Bagagwa's reclaim stage.", "ok");
+                notify("bagagwa T4 osem REACHABLE via " + SHAPES[si].tag);
+                chip(elVerdict, "ok", "osem target reachable");
+                return { ok: true, summary: "handle via " + SHAPES[si].tag };
             }
-            var h = cr.ret;
 
-            /* The create return is AMBIGUOUS on its own. Under a raw convention a small
-             * positive rax is either a handle or an errno, and 0x16 = 22 could be either.
-             * The follow-ups settle it: a GENUINE handle does not give ESRCH on close. The
-             * first 13.60 run read create=0x16, open=0xe, close=0x3, delete=0x3 -- ESRCH is
-             * "no such object", which means 0x16 was never a handle. */
-            var o = S("osem_open", 0x227, [h]);
-            var c = S("osem_close", 0x228, [h]);
-            var d = S("osem_delete", 0x226, [h]);
-            var realHandle = (c.ret !== undefined) && B(c.ret) === 0n;
-
-            if (realHandle) {
-                out("T4-create", "handle=" + hex(h) + " (proven: close returned 0)", "ok");
-                out("T4-VERDICT", "osem create/open/close/delete all answered -- the 32-bit "
-                    + "refcount at +0x54 is a reachable target.", "ok");
-                notify("bagagwa T4 osem reachable");
-                return { ok: true, summary: "reachable" };
-            }
-
-            out("T4-VERDICT", "the family EXISTS (it answered instead of returning ENOSYS) but "
-                + "create did not yield a usable handle: create=" + hex(h)
-                + ", close=" + hex(c.ret) + " (" + (c.ret === undefined ? "threw" : (c.errName || errnoHint(c.ret) || "value"))
-                + ") where a real handle must close with 0, so " + hex(h) + " was an errno, not "
-                + "a handle. The ABI is unsettled here too -- Bagagwa_chain calls (name, attr), "
-                + "PSAITO calls (name,0,1,1,0). Do NOT read this as \"osem is patched\".", "warn");
-            notify("bagagwa T4 osem answered but refused");
+            out("T4-VERDICT", "the family EXISTS (it answered instead of returning ENOSYS) but NEITHER "
+                + "create shape yielded a usable handle: " + tried.join(", ") + ". A real handle must "
+                + "close with 0, and none did, so every value above was an errno. This is the point "
+                + "at which the earlier run was misread as 'osem is patched' -- it is not that; it "
+                + "means the argument shape or the name/attr contract is still wrong. Do NOT read it "
+                + "as a kernel refusal.", "warn");
+            notify("bagagwa T4 osem answered but refused every shape");
             return { ok: true, summary: "present, no handle" };
         } catch (e) {
             out("T4-VERDICT", "THREW " + String((e && e.message) || e).slice(0, 90), "err");
