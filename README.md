@@ -10,6 +10,12 @@ greys out whichever exploit cannot run.
 
 12.00 is the one firmware both cover.
 
+> **Working on this repo? Read [`docs/PROJECT_HANDOFF.md`](docs/PROJECT_HANDOFF.md) first.**
+> It is the full state-of-play: what is verified on real hardware vs derived vs
+> copied from a public repo, the boot chain file by file, how the syscall executor
+> works, the 13.60 status and its traps, the headless test harnesses, and the exact
+> place to resume. Everything below is the upstream host's own documentation.
+
 ## Hosting
 
 Serve the directory. No build step. Works at a domain root **or in a subdirectory**
