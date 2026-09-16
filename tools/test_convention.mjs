@@ -74,6 +74,7 @@ function run(name, over, opts) {
     const T = table(over);
     const k = (nr) => "0x" + nr.toString(16);
     const calls = [];
+    let wedged = false;
     const w = {
         fw_str: "13.60",
         localStorage: {
@@ -96,8 +97,16 @@ function run(name, over, opts) {
                 if (fd === 0x7FFFFFFFn) return opts.badClose !== undefined ? opts.badClose : 0x9n;
                 return (fd === 7n || fd === 8n) ? 0x0n : 0x9n;
             }
-            /* Out-of-range syscall number: whatever `nosys` says, else ENOSYS. */
-            if (nr === 0x7FF) return opts.nosys !== undefined ? opts.nosys : 0x4En;
+            /* HARDWARE MODEL: a syscall number with no native stub does NOT return ENOSYS on
+             * 13.60 -- it WEDGES (three real runs froze ~64 s at 0x7FF). The model latches
+             * wedged and answers `WEDGED-BEFORE:` forever, which any scripted caller that
+             * still tries a second call will see. A probe that only calls proven stubs can
+             * never hit this path; a probe that regresses to unproven numbers fails here. */
+            if (k(nr) === "0x7ff") {
+                wedged = true;
+                return "WEDGED-BEFORE:0x7ff";
+            }
+            if (wedged) return "WEDGED-BEFORE:" + key;
             if (key in T) return T[key];
             throw new Error("unscripted syscall " + key);
         },
@@ -129,9 +138,12 @@ const check = (name, cond, extra) => {
 
 /* 1. raw convention, AIO present -- the shape the real 13.60 console produced. */
 {
-    const { log } = await run("raw-present", {});
+    const { log, calls } = await run("raw-present", {});
     check("1: T0 measures the raw convention", log.includes("RAW errno convention"));
-    check("1: T0 reports EBADF as 0x9 and ENOSYS as 0x4e", log.includes("(EBADF)") && log.includes("ENOSYS reads 0x4e"));
+    check("1: T0 reports EBADF as 0x9 and infers ENOSYS as 0x4e", log.includes("(EBADF)") && log.includes("ENOSYS on this kernel therefore reads 0x4e"));
+    check("1: T0 never calls unproven numbers (no 0x7ff on the wire)", !calls.includes("0x7ff"), calls.join(","));
+    check("1: T0 runs a canary after the failing call", calls.filter((c) => c.startsWith("0x14")).length >= 2, calls.join(","));
+    check("1: T0 marks the ENOSYS shape inferred, not measured", log.includes("inferred"));
     check("1: close(bad fd) decodes as errno 9, not a value", log.includes("errno-raw EBADF"));
     check("1: T3 REACHABLE", log.includes("aio_multi_wait REACHABLE"));
     check("1: T3 names EINVAL", log.includes("(EINVAL)"));
@@ -174,7 +186,7 @@ const check = (name, cond, extra) => {
 /* 4. plain -1 with T0 too broken to decide: expectFail alone must still catch ENOSYS,
  *    because a call with num=0 cannot have succeeded whatever the convention is. */
 {
-    const { log } = await run("minus1-patched", { "0x297": 0x4en }, { badClose: 0x1234n, nosys: 0x1234n });
+    const { log } = await run("minus1-patched", { "0x297": 0x4en }, { badClose: 0x1234n });
     check("4: T0 refuses to name a convention", log.includes("UNEXPECTED"));
     check("4: T3 STILL reports BAGAGWA DEAD (expectFail, no convention needed)", log.includes("BAGAGWA DEAD"));
     check("4: T3 does not report reachable", !log.includes("REACHABLE"));
@@ -182,7 +194,7 @@ const check = (name, cond, extra) => {
 
 /* 5. plain -1 convention: errno is outside rax, so ENOSYS is unknowable. Say so. */
 {
-    const { log } = await run("minus1", { "0x297": 0xFFFFFFFFFFFFFFFFn }, { badClose: 0xFFFFFFFFFFFFFFFFn, nosys: 0xFFFFFFFFFFFFFFFFn });
+    const { log } = await run("minus1", { "0x297": 0xFFFFFFFFFFFFFFFFn }, { badClose: 0xFFFFFFFFFFFFFFFFn });
     check("5: T0 detects the -1 convention", log.includes("PLAIN -1 convention"));
     check("5: T0 says the errno NUMBER is not recoverable", log.includes("not recoverable from rax"));
     check("5: T3 says CANNOT DETERMINE", log.includes("CANNOT DETERMINE"));
@@ -199,6 +211,16 @@ const check = (name, cond, extra) => {
         p.log.includes("REACHABLE KERNEL TARGET") && p.log.includes("PROVEN, close returned 0"));
     check("6c: it stops at the first shape that produces a real handle",
         p.log.indexOf("osem_create(name,attr,0,0,0)") < 0, p.log);
+}
+
+/* 6b. THE WEDGE REGRESSION -- the exact hardware failure from 2026-09-16: if anything ever
+ *      reintroduces an out-of-range call, the kernel model wedges and the run must not
+ *      silently continue. */
+{
+    const { log, calls } = await run("wedge-guard", { "0x297": 0x16n });
+    check("6b: no unproven syscall is ever on the wire", !calls.includes("0x7ff"), calls.join(","));
+    check("6b: no WEDGED marker anywhere in the log", !log.includes("WEDGED-BEFORE"));
+    check("6b: T0 still reaches its verdict", log.includes("T0-VERDICT"));
 }
 
 console.log(fails ? `\n${fails} check(s) FAILED` : "\nall convention scenarios pass");

@@ -42,9 +42,12 @@
  * prints "aio_multi_wait REACHABLE" on the one firmware where the chain is dead. Two
  * things resolve it and BOTH are used below:
  *
- *   1. T0 (Syscall convention) MEASURES it, from close() on a bad fd -- a call that cannot
- *      succeed, so whatever rax holds IS the error form -- plus an out-of-range syscall
- *      number, which must be ENOSYS and therefore shows the exact ENOSYS encoding.
+ *   1. T0 (Syscall convention) MEASURES it, from close() on a bad fd -- a native call that
+ *      cannot succeed, so whatever rax holds IS the error form -- followed by a getpid
+ *      CANARY proving the kernel still answers. (An earlier draft ended with an out-of-range
+ *      syscall number to read the ENOSYS encoding directly; on real 13.60 hardware that
+ *      call WEDGED the kernel instead of returning ENOSYS, freezing the page for the full
+ *      spin cap. T0 now calls only numbers proven to exist, and infers the ENOSYS shape.)
  *      Result is kept in CONV for the whole run.
  *   2. expectFail, passed by the caller for calls whose arguments make success impossible
  *      (aio_multi_wait with num=0). If such a call cannot have succeeded then rax is the
@@ -550,67 +553,93 @@
      * (0x4e), and a decoder that only understands the -errno shape reports 0x4e as a small
      * positive SUCCESS -- i.e. "the chain is alive" on the one firmware where it is dead.
      *
-     * Three read-only calls, each chosen so the result is not a judgement call:
-     *   close(0x7fffffff)  MUST fail with EBADF -- whatever rax holds IS the error form.
-     *                      raw => 0x9      converted => -9 (0xFFFFFFFFFFFFFFF7)
-     *                      plain -1 => 0xFFFFFFFFFFFFFFFF (errno kept elsewhere)
-     *   syscall 0x7ff      out of range, MUST be ENOSYS. Gives the exact ENOSYS encoding T3
-     *                      keys on. The kernel bounds-checks the number and returns ENOSYS;
-     *                      it cannot dispatch, allocate or write.
-     *   getpid             MUST succeed -- the control that says the chain ran at all.
-     */
+     * HARDWARE LESSON (13.60, 2026-09-16): this tile originally ended with an out-of-range
+     * syscall number (0x7FF) expecting ENOSYS. The kernel did NOT return ENOSYS -- it
+     * stopped answering altogether: the third call spun out fireSync's full cap (~64 s of
+     * freeze) and the page had to be reloaded. Three runs died at exactly that call. So the
+     * rule is now: CALL ONLY NUMBERS PROVEN TO EXIST on this firmware, and PROVE the kernel
+     * is still alive after every call that can behave unexpectedly.
+     *
+     * The measurement therefore uses ONE failing call to a native stub plus a canary:
+     *   close(0x7fffffff)   native stub (0x006 IS in the 13.60 map). MUST fail EBADF --
+     *                       whatever rax holds IS the error form:
+     *                       raw => 0x9   converted => -9   plain -1 => all-ones
+     *   getpid (canary)     native stub (0x014). MUST still answer afterwards. If it does
+     *                       not, the failing call wedged the kernel and NOTHING may be
+     *                       concluded.
+     * The ENOSYS encoding is then INFERRED from the measured convention (the kernel has one
+     * syscall return path), and the verdict says "inferred" rather than claiming it was
+     * measured -- because the only direct way to measure it cost a freeze. */
     function pConvention() {
         var ctl = S("getpid (control)", 0x014, []);
-        /* Both are calls that CANNOT succeed, so their returns are labelled as errnos even
-         * though the convention is not yet known -- which is the whole basis of the test. */
+        if (ctl.threw) {
+            out("T0-VERDICT", "getpid itself did not answer (" + ctl.threw + ") -- the executor is "
+                + "not running, so there is nothing to measure. Run Calibrate LK row first.", "warn");
+            return { ok: false, summary: "no executor" };
+        }
+        /* Cannot succeed, so its return is labelled an errno even though the convention is
+         * not yet known -- that is the whole basis of the test. Native stub, in-map number. */
         var bad = S("close(0x7fffffff) -- must fail EBADF", 0x006, [0x7FFFFFFFn], true);
-        var nx = S("syscall 0x7ff -- must fail ENOSYS", 0x7FF, [], true);
-
-        if (ctl.threw || bad.threw || nx.threw) {
-            out("T0-VERDICT", "could not measure the convention -- " + (ctl.threw || bad.threw || nx.threw)
-                + ". Every errno-shaped verdict below is UNVERIFIED.", "warn");
-            return { ok: false, summary: "threw" };
+        if (bad.threw) {
+            out("T0-VERDICT", "close() threw AFTER getpid answered (" + bad.threw + "). If RW-WEDGE "
+                + "beacons name a shape, the KERNEL stopped answering mid-tile. Convention "
+                + "UNMEASURED; every errno-shaped verdict below is UNVERIFIED.", "err");
+            return { ok: false, summary: "wedged mid-tile" };
+        }
+        /* The canary is the tile's tripwire: it distinguishes "the kernel answered and
+         * returned an errno" from "the kernel never came back" -- without it the two look
+         * identical, because both leave a small value in rax. */
+        var ctl2 = S("getpid (canary)", 0x014, []);
+        if (ctl2.threw || B(ctl2.ret) === 0n) {
+            out("T0-VERDICT", "WEDGE: the canary getpid after close() did not return a value -- the "
+                + "failing call stopped the kernel from answering (spin cap elapsed; RW-WEDGE "
+                + "beacons have the shape). Convention UNMEASURED, every verdict UNVERIFIED. "
+                + "Reload. This tile calls only numbers that are proven native stubs -- which "
+                + "is why the damage stopped at one call instead of poisoning the whole run.", "err");
+            notify("bagagwa T0: kernel wedge after close() -- reload required");
+            return { ok: false, summary: "kernel wedge" };
         }
 
-        var br = B(bad.ret), nv = B(nx.ret);
+        var br = B(bad.ret);
         function U(x) { return BigInt.asUintN(64, x); }
 
         if (br === 0x9n) CONV = "raw";
         else if (br === U(-9n)) CONV = "converted";
         else if (br === 0xFFFFFFFFFFFFFFFFn) CONV = "minus1";
 
-        var enosysShape = (nv === 0x4En) ? "0x4e"
-            : (nv === U(-78n)) ? "0xFFFFFFFFFFFFFFB2 (-78)"
-                : (nv === 0xFFFFFFFFFFFFFFFFn) ? "0xFFFFFFFFFFFFFFFF (-1)" : hex(nv);
+        var enosysShape = (CONV === "raw") ? "0x4e (inferred)"
+            : (CONV === "converted") ? "-78 (inferred)"
+                : "unreadable (the errno lives outside rax)";
 
         if (CONV === "raw") {
-            out("T0-VERDICT", "RAW errno convention. syscall_wrapper is a bare syscall;ret, so the "
-                + "kernel's errno lands in rax with no -1 conversion: close(bad fd)=" + hex(br)
-                + " (EBADF) and ENOSYS reads " + enosysShape + ". T3's ENOSYS test is therefore "
-                + "valid, and a PATCHED aio_multi_wait would read " + enosysShape + ".", "ok");
-            notify("bagagwa T0 raw errno convention; ENOSYS=" + enosysShape);
-            return { ok: true, summary: "raw (ENOSYS=" + enosysShape + ")" };
+            out("T0-VERDICT", "RAW errno convention, measured via close(bad fd)=" + hex(br)
+                + " (EBADF) with a live canary after it. syscall_wrapper is a bare syscall;ret, so "
+                + "the kernel's errno lands in rax with no -1 conversion. ENOSYS on this kernel "
+                + "therefore reads " + enosysShape + " -- inferred from the convention (one syscall "
+                + "return path), NOT measured, because the direct way to measure it cost a freeze. "
+                + "T3's ENOSYS test is valid, and a PATCHED aio_multi_wait would read 0x4e.", "ok");
+            notify("bagagwa T0 raw errno convention; ENOSYS=0x4e (inferred)");
+            return { ok: true, summary: "raw (ENOSYS=0x4e inferred)" };
         }
         if (CONV === "converted") {
             out("T0-VERDICT", "CONVERTED convention: close(bad fd) returned " + hex(br)
-                + " (-errno in rax). T3's -errno decode is valid as written -- and the corollary "
-                + "is that an AIO refusal must then read " + hex(U(-22n)) + " (-EINVAL), NOT a "
-                + "small positive value. Out-of-range syscall read " + enosysShape + ".", "ok");
+                + " (-errno in rax), canary alive. T3's -errno decode is valid as written -- and "
+                + "the corollary is that an AIO refusal must then read " + hex(U(-22n)) + " (-EINVAL), "
+                + "NOT a small positive value. ENOSYS would read " + enosysShape + ".", "ok");
             notify("bagagwa T0 converted errno convention on " + FW);
             return { ok: true, summary: "converted" };
         }
         if (CONV === "minus1") {
             out("T0-VERDICT", "PLAIN -1 convention: close(bad fd) returned 0xFFFFFFFFFFFFFFFF and the "
-                + "errno is kept ELSEWHERE (a libc/thread errno slot). The errno NUMBER is not "
-                + "recoverable from rax, so this panel CANNOT distinguish ENOSYS from a legitimate "
-                + "small return -- read the RAW returns on T3, do not trust an ENOSYS verdict. "
-                + "Out-of-range syscall read " + enosysShape + ".", "err");
+                + "errno is kept ELSEWHERE (a libc/thread errno slot), canary alive. The errno NUMBER "
+                + "is not recoverable from rax, so this panel CANNOT distinguish ENOSYS from a "
+                + "legitimate small return -- read the RAW returns on T3, do not trust an ENOSYS "
+                + "verdict.", "err");
             notify("bagagwa T0: -1 with errno elsewhere on " + FW + " -- ENOSYS unreadable");
             return { ok: false, summary: "minus1" };
         }
-        out("T0-VERDICT", "UNEXPECTED: close(0x7fffffff) returned " + hex(br) + " and syscall 0x7ff "
-            + "returned " + enosysShape + " -- neither convention fits. Treat every errno-shaped "
-            + "verdict below as unverified.", "warn");
+        out("T0-VERDICT", "UNEXPECTED: close(0x7fffffff) returned " + hex(br) + " with a live canary "
+            + "-- neither convention fits. Treat every errno-shaped verdict below as unverified.", "warn");
         return { ok: false, summary: "unknown" };
     }
 
@@ -746,7 +775,8 @@
             + (wait.errName ? " (" + wait.errName + ")" : "") + ", NOT ENOSYS. All-zero "
             + "arguments are an invalid argument set, so a refusal here proves the SYSCALL "
             + "EXISTS and rejected them; a PATCHED kernel would have returned "
-            + (CONV === "raw" ? "0x4e" : CONV === "converted" ? "-78" : "ENOSYS")
+            + (CONV === "raw" ? "0x4e (inferred from the measured raw convention)"
+                : CONV === "converted" ? "-78 (inferred)" : "ENOSYS")
             + " instead. The chain is reachable in principle -- this still does NOT settle "
             + "the ABI, which is what the armed call needs.", "ok");
         chip(elVerdict, "ok", "aio_multi_wait reachable");
@@ -1080,7 +1110,9 @@
         {
             id: "convention", label: "Syscall convention", run: pConvention,
             desc: "Read-only. Determines how this kernel reports errors, from close() on a bad "
-                + "fd plus an out-of-range syscall number. Run before trusting any errno verdict.",
+                + "fd plus a live canary. Calls only native stub numbers -- never unproven "
+                + "ones (an out-of-range call WEDGED real 13.60 hardware). Run before trusting "
+                + "any errno verdict.",
         },
         {
             id: "identity", label: "Identity", run: pIdentity,

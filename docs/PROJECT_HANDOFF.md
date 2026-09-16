@@ -290,6 +290,26 @@ evidence and the published primary has none (§10).
 `payloads/` ships `elfldr-ps5-1360.elf`. The **name** suggests 13.60 support. It is a
 filename, not a capability. Same class of trap as `offsets/kernel/data.js` (§8.3).
 
+### 8.1.1 **Calling an unproven syscall number WEDGES the kernel** (hardware lesson)
+
+T0's first draft ended with `syscall 0x7FF` expecting ENOSYS. On real 13.60 the kernel did
+**not** return ENOSYS — it stopped answering: the call spun out `fireSync`'s cap (~64 s of
+page freeze) and three consecutive runs died at exactly that call. The textbook assumption
+"out-of-range ⇒ ENOSYS" does not hold on this kernel path.
+
+Rules that now stand (enforced by `tools/test_convention.mjs` scenario 6b):
+
+* **Never call a syscall number that has not been proven to exist on this firmware** —
+  either by being in the native stub map or by having answered on hardware.
+* **Every tile that can misbehave ends with a canary call** (getpid): if the canary does
+  not answer, the kernel wedged and NOTHING may be concluded — the verdict says so instead
+  of guessing.
+* The ENOSYS encoding is **inferred** from the measured convention, never "measured"; the
+  verdict text keeps that wording honest.
+* The kernel model in `test_convention.mjs` latches `wedged` and answers
+  `WEDGED-BEFORE:` forever — any regression reintroducing an unproven call fails CI here
+  instead of freezing a console.
+
 ### 8.2 `offsets/kernel/data.js` (X1NON-PSJB) — do not paste it in
 
 ```js
@@ -344,7 +364,7 @@ mode**, so this matters.
 | tile | proves | notes |
 |---|---|---|
 | **Calibrate LK row** | measures the real `slot_expect` from the parked stack, patches the row live, persists it | read-only; see §9.2 |
-| **Syscall convention** (T0) | how this kernel reports errors | `close(0x7fffffff)` **must** fail ⇒ whatever `rax` holds is the error form; `syscall 0x7ff` **must** be ENOSYS ⇒ the exact ENOSYS encoding |
+| **Syscall convention** (T0) | how this kernel reports errors | `close(0x7fffffff)` **must** fail ⇒ whatever `rax` holds is the error form; then a getpid **canary** proves the kernel still answers. ENOSYS encoding is **inferred** — calling an unproven number to measure it wedged real hardware (§8.1.1) |
 | **Identity** (T1) | getpid/getppid/getuid/geteuid/getgid/getegid | the positive control |
 | **Descriptors** (T2) | kqueue + pipe2 | fds are **proven** by `close()==0`, then closed again |
 | **AIO reach** (T3) | `aio_init` + `aio_multi_wait` with **all-zero** args | num=0 cannot link a waiter list, so it cannot arm. The decisive test |
