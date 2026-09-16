@@ -153,11 +153,14 @@ const check = (name, cond, extra) => {
      * edited, which is exactly what happened here. */
     check("1: osem does NOT claim a reachable target from a bogus handle",
         !log.includes("REACHABLE KERNEL TARGET"));
-    check("1: osem explains 0x16 was an errno, not a handle", log.includes("was an errno, not"));
+    check("1: osem explains the sub-band rax was an errno, not a handle", log.includes("an errno, not a handle"));
     check("1: osem still reports the family EXISTS", log.includes("family EXISTS"));
     check("1: osem tried the documented 5-arg shape FIRST",
         log.indexOf("osem_create(name,0,1,1,0)") < log.indexOf("osem_create(name,attr,0,0,0)"));
-    check("1: osem tried BOTH shapes before concluding", log.includes("NEITHER create shape"));
+    check("1: osem tried all THREE shapes (incl. copied name) before concluding",
+        log.includes("osem_create(nameCopy,0,1,1,0)") && log.includes("NO create shape"));
+    check("1: osem never sent an errno-sized rax to the epilogue",
+        !calls.includes("0x228(22)"), calls.join(","));
 }
 
 /* 2. raw convention, firmware PATCHED -- the regression that mattered.
@@ -201,16 +204,22 @@ const check = (name, cond, extra) => {
     check("5: T3 does not claim reachable", !log.includes("REACHABLE"));
 }
 
-/* 6. the real log's osem row must not be mislabelled: close=0x3 is ESRCH, not success. */
+/* 6. the range ladder: a sub-band rax (0x22) is an errno and never reaches the epilogue;
+ *     a handle-sized rax must be proven by delete/close returning 0. */
 {
     const { log } = await run("osem-correct", {});
-    check("6: osem_close 0x3 decodes as ESRCH", log.includes("ESRCH"));
+    check("6: sub-band 0x22 is declared an errno, not chased", log.includes("an errno, not a handle"));
     check("6: no green refcount verdict", !log.includes("REACHABLE KERNEL TARGET"));
-    const p = await run("osem-real", { "0x225": 0x22n, "0x228": 0x0n, "0x227": 0x0n, "0x226": 0x0n });
-    check("6b: a real handle (close returns 0) IS accepted",
-        p.log.includes("REACHABLE KERNEL TARGET") && p.log.includes("PROVEN, close returned 0"));
-    check("6c: it stops at the first shape that produces a real handle",
-        p.log.indexOf("osem_create(name,attr,0,0,0)") < 0, p.log);
+    const p = await run("osem-real", { "0x225": 0x1234n, "0x228": 0x0n, "0x227": 0x0n, "0x226": 0x0n });
+    check("6b: a handle-sized rax PROVEN by delete==0 IS accepted",
+        p.log.includes("PROVEN: osem_delete returned 0"), p.log);
+    check("6b: the verdict names the 128-zone prerequisite", p.log.includes("128 zone"));
+    const q = await run("osem-candidate-refused",
+        { "0x225": 0x1234n, "0x226": 0x3n, "0x228": 0x1n, "0x227": 0xen });
+    check("6c: an unproven candidate is refused with the epilogue errnos shown",
+        q.log.includes("handle CANDIDATE") && q.log.includes("ESRCH") && q.log.includes("EPERM"), q.log);
+    check("6c: verdict names the name/attr contract as the open question",
+        q.log.includes("name/attr CONTRACT") && q.log.includes("Next differential"));
 }
 
 /* 6b. THE WEDGE REGRESSION -- the exact hardware failure from 2026-09-16: if anything ever

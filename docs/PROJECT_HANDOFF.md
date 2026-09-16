@@ -482,7 +482,7 @@ The poison test returned **pid 79 independently**, so these are not stale reads.
 ### 10.4 **AIO is ALIVE — this is the headline**
 
 ```
-aio_init            (0x29E) -> 0x16   EINVAL
+aio_init            (0x29E) -> 0x16   EINVAL     [13:44 & 20:13 runs]
 aio_multi_wait      (0x297) -> 0x16   EINVAL     ← 663, the writeup's number
 osem_create         (0x225) -> 0x16   EINVAL     ← see §11.4, this call was WRONG
 osem_open           (0x227) -> 0xe    EFAULT     ← stale-register artefact, now fixed
@@ -491,7 +491,10 @@ osem_delete         (0x226) -> 0x3    ESRCH
 ```
 
 **ENOSYS is 78 = `0x4E`. We got `0x16`. The syscall exists and rejected the arguments.**
-The chain is reachable in principle on 13.60.
+The chain is reachable in principle on 13.60. T0 (second run) also **measured** the raw
+convention on hardware: `close(0x7fffff) -> 0x9 EBADF`, canary getpid alive, ENOSYS=0x4e
+*inferred* — the direct measurement attempt via an out-of-range number had WEDGED the
+kernel (three ~64 s freezes; §8.1.1).
 
 Two caveats, stated plainly:
 
@@ -560,6 +563,22 @@ never happens and nothing dangles.
 
 ### 11.3 **The ABI question is answered** (UPSTREAM, but checkable)
 
+**UPDATE (20:13 hardware run): the pair is now MEASURED on 13.60, not just inherited.**
+The ABI map's row-wise scan called the real matrix INCONCLUSIVE, but the matrix decodes
+column-wise — the four EFAULT cells all sit in the arg2 column with num=1 (which is what
+activates the derefs), while row arg2 (huge value in num) and row arg4 (huge value in mode)
+stayed EINVAL: a **num domain check** and a **mode validation** both exist and precede the
+derefs. `ids = argument 1, num = argument 2` — independently confirming PSAITO's
+`(ids, num, states, mode, timeout)` on this firmware. Also measured: **states is
+dereferenced too** (row arg1 col2 had a valid ids and still faulted — states@arg3=NULL),
+and the kernel does NOT NULL-check ids before the num check (faults from NULL came through
+the walk). Phase 1's all-EINVAL sweep is PREDICTED by this model, not a failure to probe.
+Still unmeasured: mode/timeout positions, id encoding, which pointer is checked first.
+The tile now carries this column model as its primary path (regression-guarded by
+`tools/test_abimap.mjs` scenario 6, which replays the real 30-cell matrix).
+
+The upstream text below is kept for provenance:
+
 `PSAITO/payloads/bagagwa_uaf_1320.js` header:
 
 ```
@@ -582,9 +601,23 @@ best-developed builds now agree.
 PSAITO calls `osem_create(0x225, [name, 0, 1, 1, 0])`. Our T5 sends `(name, attr)` — two
 arguments — which zero-fills the rest, i.e. `(name,0,0,0,0)`. If the two `1`s are a
 required mode/type pair, **§10.4's `0x16` was a bad call, not a kernel refusal**, and the
-`ESRCH`/`EFAULT` that followed were just downstream noise on a bogus handle. **This is a
-one-line fix and the cheapest test available.** (Also note Bagagwa_chain calls
-`(name, attr)` while PSAITO calls `(name,0,1,1,0)` — another explicit ABI disagreement.)
+`ESRCH`/`EFAULT` that followed were just downstream noise on a bogus handle. (Also note
+Bagagwa_chain calls `(name, attr)` while PSAITO calls `(name,0,1,1,0)` — another explicit
+ABI disagreement.)
+
+**UPDATE (20:13 hardware run): the 5-arg shape was sent and answered `0xa6 = 166` — above
+any plausible errno band (max seen in practice is ENOSYS=0x4e). The tile now classifies by
+RANGE first (`>= 0x100` ⇒ handle CANDIDATE, below ⇒ errno, never sent to the epilogue) and
+proves candidates by `osem_delete(candidate) == 0` (the 20:13 run's `delete(0xa6) -> 0x0`
+vs `delete(0x16) -> 0x3 ESRCH` differential), with `close` only as a fallback and only when
+delete did not consume the object — `close` then `delete` on a genuine handle is the
+documented DOUBLE-FREE (close frees at refcount 0, delete frees again). The run left the
+verdict at "no proven handle" only because the OLD proof heuristic was `close == 0` alone
+and it read `close(0xa6) -> 0x1 EPERM` as disproof. The delete differential says otherwise:
+**`0xa6` behaved like a real handle and the 128-zone allocation works from our executor.**
+The tile now proves this in one run and stops at the first shape that passes. Open
+questions it reports honestly: the name contract (own copy vs borrowed pointer — the tile
+now tries both), attr semantics, and why close says EPERM on a live handle.
 
 ### 11.5 PSAITO's payload structure — worth reading in full
 

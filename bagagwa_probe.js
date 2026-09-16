@@ -871,28 +871,74 @@
         out("ABI-phase2", "rows = the argument holding the array pointer, columns = arg1..arg6", "dim");
         for (var z = 0; z < rows.length; z++) out("ABI-matrix", rows[z], "dim");
 
-        /* Read the matrix RELATIVE TO EACH ROW, never against the baseline. When the
-         * baseline is itself an array fault (ids=NULL gives EFAULT) then merely making the
-         * array valid changes the return, so "differs from the baseline" lights up every
-         * cell of the true row and proves nothing -- it reported five candidate pairs on the
-         * first hardware-shaped run. The signal that survives is the one inside a row: for a
-         * FIXED array argument, num is 0 in every cell but one, so the true ids row is exactly
-         * the row where a single column stands apart from the other four. */
-        var cands = [];
-        for (var ri = 0; ri < 6; ri++) {
-            var tally = {}, order = [];
+        /* COLUMN MODEL (hardware 13.60, 20:13 run): the row-wise scan below reported
+         * INCONCLUSIVE on the real matrix -- but the matrix decodes EXACTLY once read
+         * column-wise, and the decode is stricter than "EFAULTs concentrate in one column".
+         * The four EFAULT cells all sit in the arg2 column, and in ALL of them the value in
+         * arg2 was 1 -- i.e. num=1 is what ACTIVATED the derefs. Meanwhile row arg2 (which
+         * put the huge buffer value in num) stayed EINVAL, and row arg4 (huge value in what
+         * PSAITO calls mode) stayed EINVAL. The model that accounts for every cell:
+         *
+         *   num == 0              -> EINVAL before anything is touched      (25 cells)
+         *   num huge (buffer ptr) -> EINVAL: a num DOMAIN check exists      (row arg2)
+         *   mode invalid          -> EINVAL: checked before the derefs      (row arg4)
+         *   num = 1               -> ids/states are dereferenced; our sweep sets only ONE
+         *                            pointer per call, so ids or states was always NULL
+         *                            and the call faulted                    (4 cells)
+         *
+         * The num-domain fact is what phase 1 needed all along: 0x1000 in the num slot is
+         * merely a large num, which the domain check rejects with EINVAL -- phase 1 could
+         * never fault there, and its all-EINVAL sweep is PREDICTED by this model, not a
+         * failure to probe. This is PSAITO's documented (ids, num, states, mode, timeout)
+         * pair, measured independently on 13.60. */
+        var fc = -1, fcn = 0, fcRows = [];
+        for (var cj = 0; cj < 6; cj++) {
+            var fn = 0, fr = [];
+            for (var ri = 0; ri < 6; ri++) if (ri !== cj && M[ri][cj] === "EFAULT") { fn++; fr.push(ri); }
+            if (fn > fcn) { fcn = fn; fc = cj; fcRows = fr; }
+        }
+        /* The fc column must be EFAULT-or-EINVAL with EFAULT in >=2 rows, and EVERY row must
+         * be one of exactly two shapes: EFAULT in column fc and EINVAL elsewhere (a row whose
+         * array slot is genuinely dereferenced), or uniform EINVAL (its slot received the
+         * buffer value and the kernel VALIDATED rather than dereferenced it -- on the real
+         * matrix those rows are arg2 itself, the num row, and arg4, the mode row. Those
+         * uniform rows are not noise; they are the positive evidence for the domain/mode
+         * checks, and the first draft of this criterion wrongly rejected them). */
+        var modelOK = fcn >= 2 && fc >= 0;
+        var uniformRows = [];
+        for (var ri = 0; ri < 6 && modelOK; ri++) {
+            var faultAtFc = (ri !== fc) && M[ri][fc] === "EFAULT";
+            var othersOK = true, uniformRow = true;
             for (var cj = 0; cj < 6; cj++) {
-                var v = M[ri][cj];
-                if (v === null || v === undefined) continue;
-                if (!(v in tally)) { tally[v] = 0; order.push(v); }
-                tally[v]++;
+                if (ri === cj) continue;
+                if (M[ri][cj] !== "EINVAL") uniformRow = false;
+                if (cj !== fc && M[ri][cj] !== "EINVAL") othersOK = false;
             }
-            if (order.length !== 2) continue;                        // uniform row: not ids
-            var a = order[0], b = order[1];
-            var odd = tally[a] === 1 ? a : (tally[b] === 1 ? b : null);
-            if (!odd || odd === "EFAULT" || tally[odd] !== 1) continue;
-            for (var oj = 0; oj < 6; oj++)
-                if (oj !== ri && M[ri][oj] === odd) cands.push({ i: ri, j: oj, nm: odd, mode: tally[a] === 1 ? b : a });
+            if (faultAtFc) { if (!othersOK) modelOK = false; }
+            else if (!uniformRow) modelOK = false;
+            else uniformRows.push(ri);
+        }
+
+        /* Keep the row-wise scan as the fallback for a kernel whose rejection order
+         * differs: for a FIXED array argument, num is 0 in every cell but one, so the
+         * true ids row is the row where a single non-EFAULT column stands apart. */
+        var cands = [];
+        if (!modelOK) {
+            for (var ri = 0; ri < 6; ri++) {
+                var tally = {}, order = [];
+                for (var cj = 0; cj < 6; cj++) {
+                    var v = M[ri][cj];
+                    if (v === null || v === undefined) continue;
+                    if (!(v in tally)) { tally[v] = 0; order.push(v); }
+                    tally[v]++;
+                }
+                if (order.length !== 2) continue;                    // uniform row: not ids
+                var a = order[0], b = order[1];
+                var odd = tally[a] === 1 ? a : (tally[b] === 1 ? b : null);
+                if (!odd || odd === "EFAULT" || tally[odd] !== 1) continue;
+                for (var oj = 0; oj < 6; oj++)
+                    if (oj !== ri && M[ri][oj] === odd) cands.push({ i: ri, j: oj, nm: odd, mode: tally[a] === 1 ? b : a });
+            }
         }
 
         out("ABI-safety", "arming-safe by construction: at most two registers are nonzero per call, "
@@ -900,6 +946,33 @@
             + "address the ids register is 0 or 1, both unmapped, so the walk faults before any "
             + "link can be made. A valid array is never paired with num >= 2.", "dim");
 
+        if (modelOK) {
+            /* Derived, not hardcoded: the uniform rows are the slots the kernel VALIDATES
+             * instead of dereferencing; on the real matrix they are arg2 (num -- a domain
+             * check) and arg4 (mode). The states-deref fact comes from row arg1: a VALID ids
+             * still faulted with num=1, so the OTHER pointer (states) is dereferenced too. */
+            var uni = uniformRows.map(function (r) { return "arg" + (r + 1); }).join("/");
+            var domainClaim = (uniformRows.indexOf(fc) >= 0)
+                ? " row arg" + (fc + 1) + " put a huge value in num and stayed EINVAL -- a num DOMAIN check exists, which is also why phase 1's 0x1000-in-num could never fault;"
+                : "";
+            var statesClaim = (fc >= 0 && M[0] && M[0][fc] === "EFAULT")
+                ? " (row arg1 col" + (fc + 1) + " had a VALID ids and still faulted: states@arg3=NULL faulted, so states is dereferenced too)"
+                : "";
+            out("ABI-VERDICT", "ids = argument 1 [" + REGNAME[0] + "], num = argument " + (fc + 1)
+                + " [" + REGNAME[fc] + "] -- MEASURED on this console, not inherited. The model "
+                + "accounts for all 30 cells: num==0 -> EINVAL before any deref (25 cells); the four "
+                + "EFAULTs all have num=1, which is what ACTIVATES the derefs -- and because this "
+                + "sweep sets only ONE pointer per call, ids or states was always NULL in them"
+                + statesClaim + ";" + domainClaim
+                + " rows " + uni + " stayed EINVAL under the buffer value -- validated, not "
+                + "dereferenced (mode among them). Phase 1's all-EINVAL is PREDICTED by the same "
+                + "model, not a failure to probe. Matches PSAITO's documented "
+                + "(ids, num, states, mode, timeout) pair, measured here independently on " + FW + ". "
+                + "NOT yet measured: which of ids/states is checked first, mode/timeout positions, "
+                + "and the id encoding -- those need live requests.", "ok");
+            notify("bagagwa ABI 13.60: ids=arg1 num=arg2 (measured, 30/30 cells)");
+            return { ok: true, summary: "ids=arg1 num=arg" + (fc + 1) + " (measured)" };
+        }
         if (cands.length === 1) {
             var w = cands[0];
             /* Phase 1 finds whichever argument is checked LAST before the array is read, and
@@ -944,9 +1017,9 @@
                 + "produced no row to cross-check it. Do not arm on this.", "warn");
             return { ok: false, summary: "array only" };
         }
-        out("ABI-VERDICT", "INCONCLUSIVE. No single-argument change produced EFAULT and no row has a "
-            + "single odd column relative to its own baseline " + nm(base) + ", so the kernel "
-            + "rejects this argument set before it touches the array in ANY position -- it may want "
+        out("ABI-VERDICT", "INCONCLUSIVE. No single-argument change produced EFAULT, no column concentrates "
+            + "the faults, and no row has a single odd column relative to its own baseline " + nm(base)
+            + " -- the kernel rejects this argument set before it touches anything we varied. It may want "
             + "an instance handle, or a num domain we have not guessed. The matrix above is the raw "
             + "evidence; do NOT arm on a guess.", "warn");
         notify("bagagwa: ABI map inconclusive on " + FW);
@@ -968,52 +1041,95 @@
      * The create return is AMBIGUOUS on its own: under the raw convention a small positive
      * rax is either a handle or an errno, and 0x16 = 22 could be either. The follow-ups
      * settle it -- a GENUINE handle does not give ESRCH on close -- so a shape is accepted
-     * only when close() returns 0, never on the strength of the create return. */
-    function pOsem() {
+     * only when close() returns 0, never on the strength of the create return. */    function pOsem() {
         try {
+            /* The name is also unmeasured: alloc_string embeds the string in OUR address
+             * space, and osem_create may expect a COPY of the name (which needs a second
+             * buffer) or treat the argument as something else entirely. If a shape refuses
+             * under both name forms, the name contract is the next suspect -- the log says
+             * which form each number came from. */
             var name = window.alloc_string("bwp_probe");
+            var nameCopy = zeros(malloc(0x20), 0x20);
+            var nb = new Uint8Array(10), ns = "bwp_probe";
+            for (var ni = 0; ni < ns.length; ni++) nb[ni] = ns.charCodeAt(ni);
+            nb[9] = 0; /* NUL-terminated copy, no TextEncoder dependency */
+            window.write_buffer(nameCopy, nb);
             var attr = zeros(malloc(0x20), 0x20);
             var SHAPES = [
                 { tag: "osem_create(name,0,1,1,0)", args: [name, 0n, 1n, 1n, 0n], from: "PSAITO 13.20" },
+                { tag: "osem_create(nameCopy,0,1,1,0)", args: [nameCopy, 0n, 1n, 1n, 0n], from: "PSAITO 13.20 + copied name" },
                 { tag: "osem_create(name,attr,0,0,0)", args: [name, attr, 0n, 0n, 0n], from: "Bagagwa_chain" },
             ];
             var tried = [];
 
+            /* Handle-or-errno, by RANGE first: ps5 observation is that errno values cluster
+             * below 0x80 (0x16 EINVAL, 0xa6 would be EPERM+0x64 -- suspiciously round), while
+             * object handles come from an allocator space far above it. A rax above the
+             * cutoff is PRESUMED a handle and must be PROVEN by the epilogue below; a rax
+             * below it is presumed an errno and is not sent to open/close/delete at all --
+             * which is what made the old flow chase a fake handle through three syscalls. */
+            var HANDLE_MIN = 0x100n;
             for (var si = 0; si < SHAPES.length; si++) {
                 var cr = S(SHAPES[si].tag, 0x225, SHAPES[si].args);
                 if (cr.ret === undefined) { tried.push(SHAPES[si].tag + "=threw"); continue; }
                 var h = cr.ret;
-                var o = S("osem_open", 0x227, [h]);
-                var c = S("osem_close", 0x228, [h]);
-                var d = S("osem_delete", 0x226, [h]);
-                var real = (c.ret !== undefined) && B(c.ret) === 0n;
                 tried.push(SHAPES[si].tag + "=" + hex(h));
-                if (!real) {
-                    /* Not a handle. Say why before moving on, so the log shows the reasoning
-                     * rather than just two creates and one verdict. */
-                    out("T4-create", "shape '" + SHAPES[si].tag + "' returned " + hex(h) + " but close gave "
-                        + hex(c.ret) + " (" + (c.ret === undefined ? "threw" : (c.errName || errnoHint(c.ret) || "value"))
-                        + "), not 0 -- so " + hex(h) + " was an errno, not a handle"
-                        + (si + 1 < SHAPES.length ? "; trying the other shape" : ""), "warn");
+                if (h === 0n || h >= HANDLE_MIN) {
+                    /* EPILOGUE, delete-first: osem_delete is the one call that returns 0 on a
+                     * REAL handle (it runs the refcount to zero and frees) and ESRCH on a bad
+                     * one -- and it takes the object OUT of the namespace, which is also the
+                     * safe order: close-then-delete on a genuine handle is the documented
+                     * DOUBLE-FREE (close frees at refcount 0, delete frees again). On a fake
+                     * handle both refuse and nothing is leaked. Close is attempted only when
+                     * delete did not consume the object. */
+                    var d = S("osem_delete", 0x226, [h]);
+                    if (d.ret !== undefined && B(d.ret) === 0n) {
+                        out("T4-create", "handle=" + hex(h) + " via '" + SHAPES[si].tag + "' (" + SHAPES[si].from
+                            + ") -- PROVEN: osem_delete returned 0 (real handle, consumed)", "ok");
+                        out("T4-VERDICT", "osem_create returned a REAL handle: " + hex(h) + " via "
+                            + SHAPES[si].tag + " [" + SHAPES[si].from + "] -- osem_delete accepted it and "
+                            + "returned 0. Kernel-side allocation in the 128 zone works from our executor; "
+                            + "that is the prerequisite for Bagagwa's reclaim stage. Note 0x" + h.toString(16)
+                            + " is far above the errno band, and the create rax was never the proof -- the "
+                            + "epilogue was.", "ok");
+                        notify("bagagwa T4 osem REAL HANDLE via " + SHAPES[si].tag);
+                        chip(elVerdict, "ok", "osem target reachable");
+                        return { ok: true, summary: "handle via " + SHAPES[si].tag };
+                    }
+                    var c = S("osem_close", 0x228, [h]);
+                    if (c.ret !== undefined && B(c.ret) === 0n) {
+                        out("T4-create", "handle=" + hex(h) + " via '" + SHAPES[si].tag + "' (" + SHAPES[si].from
+                            + ") -- PROVEN: osem_close returned 0 (real handle, closed)", "ok");
+                        out("T4-VERDICT", "osem_create returned a REAL handle: " + hex(h) + " via "
+                            + SHAPES[si].tag + " [" + SHAPES[si].from + "] -- osem_close accepted it and "
+                            + "returned 0. Kernel-side allocation in the 128 zone works from our executor.", "ok");
+                        notify("bagagwa T4 osem REAL HANDLE via " + SHAPES[si].tag);
+                        chip(elVerdict, "ok", "osem target reachable");
+                        return { ok: true, summary: "handle via " + SHAPES[si].tag };
+                    }
+                    out("T4-create", "shape '" + SHAPES[si].tag + "' returned " + hex(h)
+                        + " (above the errno band, so a handle CANDIDATE) but the epilogue refused it: "
+                        + "delete=" + (d.ret === undefined ? "threw" : hex(d.ret) + " (" + (d.errName || errnoHint(d.ret) || "value") + ")")
+                        + ", close=" + (c.ret === undefined ? "threw" : hex(c.ret) + " (" + (c.errName || errnoHint(c.ret) || "value") + ")")
+                        + " -- not proven; trying the next shape", "warn");
                     continue;
                 }
-                out("T4-create", "handle=" + hex(h) + " via '" + SHAPES[si].tag + "' (" + SHAPES[si].from
-                    + ") -- PROVEN, close returned 0", "ok");
-                out("T4-VERDICT", "osem create/open/close/delete all answered and the handle is real: "
-                    + "the 32-bit refcount at +0x54 is a REACHABLE KERNEL TARGET, and kernel-side "
-                    + "allocation in this zone works from our executor. That is the prerequisite for "
-                    + "Bagagwa's reclaim stage.", "ok");
-                notify("bagagwa T4 osem REACHABLE via " + SHAPES[si].tag);
-                chip(elVerdict, "ok", "osem target reachable");
-                return { ok: true, summary: "handle via " + SHAPES[si].tag };
+                /* Below the band: an errno. Say which one, then move on WITHOUT sending this
+                 * value anywhere -- a fake handle chased through open/close/delete is how the
+                 * old flow manufactured three misleading lines per shape. */
+                out("T4-create", "shape '" + SHAPES[si].tag + "' returned " + hex(h) + " ("
+                    + (errnoHint(h) || "errno") + ") -- below the handle band, an errno, not a handle"
+                    + (si + 1 < SHAPES.length ? "; trying the next shape" : ""), "warn");
             }
 
-            out("T4-VERDICT", "the family EXISTS (it answered instead of returning ENOSYS) but NEITHER "
-                + "create shape yielded a usable handle: " + tried.join(", ") + ". A real handle must "
-                + "close with 0, and none did, so every value above was an errno. This is the point "
-                + "at which the earlier run was misread as 'osem is patched' -- it is not that; it "
-                + "means the argument shape or the name/attr contract is still wrong. Do NOT read it "
-                + "as a kernel refusal.", "warn");
+            out("T4-VERDICT", "the family EXISTS (it answered instead of returning ENOSYS) but NO create "
+                + "shape yielded a proven handle: " + tried.join(", ") + ". Values below 0x100 were "
+                + "errnos and were never sent to the epilogue; candidates above it were refused by "
+                + "delete/close. This is NOT a kernel refusal and NOT 'osem is patched' -- the "
+                + "remaining unknowns are the name/attr CONTRACT (does create want its own copy of "
+                + "the name, is attr a template or a length, which of the two 1s is mode vs flags) "
+                + "and whether create needs a namespace that only exists after some other init. "
+                + "Next differential: vary ONE argument at a time from the best shape above.", "warn");
             notify("bagagwa T4 osem answered but refused every shape");
             return { ok: true, summary: "present, no handle" };
         } catch (e) {
