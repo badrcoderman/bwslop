@@ -69,13 +69,27 @@ window.P2JB_LK = {
     // throw), while a wrong syscall_wrapper/setjmp/longjmp jumps to a bad address and
     // kills the WebProcess (browser tab, recoverable).
     //
-    // HARDWARE RESULT (13.60 console, first probe run): slot_expect 0x1983B is WRONG
+    // HARDWARE RESULT (13.60 console, 2026-09): slot_expect 0x1983B is WRONG
     // -- resolveSlot() found no parked slot at kbase+0x1983B (every syscall threw
     // before any kernel call). thread_list=0x6C218 is hardware-VERIFIED: find_worker()
-    // succeeded. bagagwa_probe.js's "Calibrate LK row" tile now measures the real
+    // succeeded. bagagwa_probe.js's "Calibrate LK row" tile measures the real
     // slot_expect from the parked worker stack (the qword resolveSlot scans for IS
     // the live return address into libkernel text) and derives the other three RVAs
     // at the fixed 12.x-group deltas, patching THIS row live via the executor's
-    // by-reference lk. The values below remain the pre-calibration placeholders.
-    "13.60": { syscall_wrapper: 0x1AE67, setjmp: 0x1D3F3, longjmp: 0x1D44C, pthread_create: 0x79B0, slot_expect: 0x1983B, thread_list: 0x6C218 },
+    // by-reference lk.
+    //
+    // CALIBRATED VALUES (hardware 2026-09, two independent derivations agreeing):
+    //  * slot_expect = 0x1988B. (a) 12.00's 0x197FB + the verified stub shift: EVERY
+    //    syscall stub moved exactly +0x90 from 12.00 to 13.60 (0x001: 0x1BA8A->0x1BB1A,
+    //    0x007: 0x1AE50->0x1AEE0, ...). (b) Found frame-validated in the parked worker
+    //    stack top at stack+0x7fc28 (12.00 parks at 0x7fc18). The probe's picker now
+    //    prefers this anchor explicitly.
+    //  * 0x1FD01 also frame-validated on the stack = PSAITO's worker_wait_return.
+    //    Second anchor; recorded for cross-reference, not used by the executor.
+    //  * syscall_wrapper/setjmp/longjmp are still delta-derived (anchor + the fixed
+    //    12.x-group deltas +0x162C/+0x3BB8/+0x3C11), NOT yet proven on hardware: the
+    //    first calibrated run hijacked through the WRONG slot (0x2198d, the thread-entry
+    //    trampoline), so these three remain the one unverified leg. If Identity fails
+    //    after a successful calibrate, these are the suspects.
+    "13.60": { syscall_wrapper: 0x1AEB7, setjmp: 0x1D443, longjmp: 0x1D49C, pthread_create: 0x79B0, slot_expect: 0x1988B, thread_list: 0x6C218 },
 };

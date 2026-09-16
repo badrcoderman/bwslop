@@ -330,6 +330,13 @@
     /* BigInt literals: they are ADDED to the measured slot_expect, and BigInt + number throws. */
     var DELTAS = { syscall_wrapper: 0x162Cn, setjmp: 0x3BB8n, longjmp: 0x3C11n };
 
+    /* The cond_wait-resume return address resolveSlot() fingerprints, derived for
+     * 13.60 statically: 12.00's 0x197FB + the verified +0x90 stub shift (EVERY
+     * syscall stub moved exactly +0x90 between 12.00 and 13.60 -- see p2jb_lk.js).
+     * Hardware-confirmed 2026-09: found frame-validated in the parked worker
+     * stack top at stack+0x7fc28 (12.00 parks at 0x7fc18). */
+    var KNOWN = { slot_expect: 0x1988Bn };
+
     function loadCalib() {
         try { var s = localStorage.getItem(CALIBKEY); return s ? JSON.parse(s) : null; } catch (e) { return null; }
     }
@@ -400,27 +407,56 @@
                 try {
                     applyCalib(saved);
                     out("CAL-VERDICT", "scan found nothing; re-applied the persisted row (slot_expect="
-                        + hex(BigInt(saved.slot_expect)) + ", measured " + new Date(saved.ts).toISOString() + ")", "warn");
+                        + hex(BigInt(saved.slot_expect)) + (saved.verified ? ", anchor-verified" : ", NOT anchor-verified -- re-run Calibrate when the worker is parked")
+                        + ", measured " + new Date(saved.ts).toISOString() + ")", saved.verified ? "warn" : "err");
                     return { ok: true, summary: "restored " + hex(BigInt(saved.slot_expect)) };
                 } catch (e) { out("CAL-VERDICT", "persisted row unusable: " + String((e && e.message) || e).slice(0, 60), "warn"); }
             }
             out("CAL-VERDICT", "no candidate found -- worker not parked where expected; nothing measured", "err");
             return { ok: false, summary: "no candidates" };
         }
-        for (var i = 0; i < hits.length; i++)
-            out("CAL-CAND", "stack+" + hex(hits[i].addr - B(st.stack)) + " -> libkernel+" + hex(hits[i].rva)
-                + (hits[i].validated ? "  [live frame: saved rbp=stack+" + hex(hits[i].savedRbp - B(st.stack)) + "]"
-                                     : "  [no frame validation]"),
-                hits[i].validated ? "ok" : "warn");
+        /* Collapse repeats first: the same libkernel RVA on many stack words is a DATA
+         * constant copied into frames, not a return address -- on the first hardware
+         * run 25 of 38 hits were __stack_chk_guard (libkernel+0x751d0). One line per
+         * RVA; data words (count >= 3) never win the pick. */
+        var byRva = {};
+        for (var j = 0; j < hits.length; j++) {
+            var key = hits[j].rva.toString(16);
+            var g = byRva[key] || (byRva[key] = { rva: hits[j].rva, count: 0, best: null });
+            g.count++;
+            if (!g.best || (hits[j].validated && !g.best.validated)) g.best = hits[j];
+        }
+        var groups = [];
+        for (var key2 in byRva) groups.push(byRva[key2]);
+        groups.sort(function (a, b) { return Number(b.best.addr - a.best.addr); });
+        for (var i = 0; i < groups.length; i++) {
+            var gr = groups[i], data = gr.count >= 3;
+            out("CAL-CAND", "stack+" + hex(gr.best.addr - B(st.stack)) + " -> libkernel+" + hex(gr.rva)
+                + (data ? "  [x" + gr.count + " -- repeated data word, excluded]"
+                : (gr.best.validated ? "  [live frame: saved rbp=stack+" + hex(gr.best.savedRbp - B(st.stack)) + "]"
+                                     : "  [no frame validation]")),
+                data ? "dim" : (gr.best.validated ? "ok" : "warn"));
+            if (data) { groups.splice(i, 1); i--; }
+        }
 
-        /* Preference order is resolveSlot()'s own: the HIGHEST frame-validated match,
-         * else the highest raw match (hits are already highest-first). With more than
-         * one candidate and none validated, say the pick is a guess instead of a fact. */
-        var pick = null;
-        for (var j = 0; j < hits.length; j++) { if (hits[j].validated) { pick = hits[j]; break; } }
-        if (!pick) pick = hits[0];
-        if (hits.length > 1 && !pick.validated)
-            out("CAL-VERDICT", "AMBIGUOUS -- " + hits.length + " candidates, none frame-validated; the highest is a guess", "warn");
+        /* Priority: (1) the statically derived anchor -- the cond_wait-resume return
+         * resolveSlot() itself fingerprints. (2) highest frame-validated return
+         * address. (3) highest raw hit, explicitly labelled a guess. Rule (1) exists
+         * because of the first hardware run: the highest live frame was the
+         * thread-ENTRY trampoline (libkernel+0x2198d, also frame-valid), not the
+         * parked frame. */
+        var pick = null, verified = false;
+        for (var k = 0; k < groups.length; k++)
+            if (groups[k].rva === KNOWN.slot_expect) { pick = groups[k].best; verified = true; break; }
+        if (!pick) for (var k2 = 0; k2 < groups.length; k2++) if (groups[k2].best.validated) { pick = groups[k2].best; break; }
+        if (!pick && groups.length) pick = groups[0].best;
+        if (!pick) {
+            out("CAL-VERDICT", "every candidate was a repeated data word -- nothing usable to pick", "err");
+            return { ok: false, summary: "no candidates" };
+        }
+        if (!verified)
+            out("CAL-VERDICT", "anchor libkernel+0x" + KNOWN.slot_expect.toString(16)
+                + " NOT on the stack -- picked " + hex(pick.rva) + " by frame/range rules; treat as unverified", "warn");
 
         var slotExpect = pick.rva;
         var row = {
@@ -429,19 +465,20 @@
             setjmp: slotExpect + DELTAS.setjmp,
             longjmp: slotExpect + DELTAS.longjmp,
             ts: Date.now(),
-            via: pick.validated ? "stack-scan+rbp" : "stack-scan",
+            via: verified ? "anchor-0x1988b" : (pick.validated ? "stack-scan+rbp" : "stack-scan"),
             candidates: hits.length,
+            verified: verified,
         };
         try { applyCalib(row); } catch (e) {
             out("CAL-VERDICT", "measured but could not apply: " + String((e && e.message) || e).slice(0, 70), "err");
             return { ok: false, summary: "apply failed" };
         }
         saveCalib(row);
-        var guess = 0x1983B;
-        var diff = slotExpect >= guess ? (slotExpect - guess) : (guess - slotExpect);
-        out("CAL-MEASURED", "slot_expect=" + hex(BigInt(slotExpect))
-            + "  (the extrapolated guess " + hex(BigInt(guess)) + " was off by "
-            + (slotExpect >= guess ? "+" : "-") + "0x" + diff.toString(16) + ")", "ok");
+        var guess = 0x1983Bn;   /* BigInt: a plain Number here threw on hardware (BigInt mix) */
+        var diff = slotExpect >= guess ? slotExpect - guess : guess - slotExpect;
+        out("CAL-MEASURED", "slot_expect=" + hex(slotExpect)
+            + "  (the extrapolated guess " + hex(guess) + " was off by "
+            + (slotExpect >= guess ? "+" : "-") + hex(diff) + ")", "ok");
         out("CAL-DERIVED", "syscall_wrapper=" + hex(BigInt(row.syscall_wrapper)) + " setjmp=" + hex(BigInt(row.setjmp))
             + " longjmp=" + hex(BigInt(row.longjmp)) + "  (fixed 12.x-group deltas)", "dim");
         out("CAL-VERDICT", "row patched live; thread_list stays 0x6c218 (hardware-verified). "
