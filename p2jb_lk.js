@@ -68,5 +68,14 @@ window.P2JB_LK = {
     // memory: a wrong slot_expect makes resolveSlot()'s scan find nothing (clean
     // throw), while a wrong syscall_wrapper/setjmp/longjmp jumps to a bad address and
     // kills the WebProcess (browser tab, recoverable).
+    //
+    // HARDWARE RESULT (13.60 console, first probe run): slot_expect 0x1983B is WRONG
+    // -- resolveSlot() found no parked slot at kbase+0x1983B (every syscall threw
+    // before any kernel call). thread_list=0x6C218 is hardware-VERIFIED: find_worker()
+    // succeeded. bagagwa_probe.js's "Calibrate LK row" tile now measures the real
+    // slot_expect from the parked worker stack (the qword resolveSlot scans for IS
+    // the live return address into libkernel text) and derives the other three RVAs
+    // at the fixed 12.x-group deltas, patching THIS row live via the executor's
+    // by-reference lk. The values below remain the pre-calibration placeholders.
     "13.60": { syscall_wrapper: 0x1AE67, setjmp: 0x1D3F3, longjmp: 0x1D44C, pthread_create: 0x79B0, slot_expect: 0x1983B, thread_list: 0x6C218 },
 };
