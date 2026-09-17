@@ -63,7 +63,7 @@ body{
        &burn=1                  DANGER: sprays after every close, PANICKED the kernel in
                                 v73. Do not use. -->
 <a class="btn" id="btnp2jb"
-   href="p2jb.html?go=1&amp;auto=1&amp;trigger=netcontrol&amp;payload=1&amp;v=138"
+   href="p2jb.html?go=1&amp;auto=1&amp;trigger=netcontrol&amp;payload=1&amp;v=139"
    tabindex="0">P2JB</a>
 
 <!-- sockets= is deliberately NOT forced here any more. poops.html's own default is 80
@@ -100,13 +100,46 @@ body{
      It exists because 13.60 is the firmware poops and p2jb are both patched on, so the
      only useful question left there is whether the kernel still REACHES these calls at
      all - which is answerable in one run, non-destructively, before anyone arms Bagagwa.
-     The real UAF is deliberately not wired to a button; see bagagwa_probe.js.
 
-     ?sc=1 is the switch. It is checked in p2jb.html's handoff block, right where the
-     kernel module would otherwise be loaded - one branch, no duplicated boot code. -->
+     The real UAF IS wired now - behind the "UNSAFE" checkbox below. Ticking it appends
+     &arm=1, which is the ONLY way the armed tile renders and runs (and a failed armed
+     run is a POWER CYCLE, not a reload). The auto-run checkbox appends &scauto=1: with
+     it the suite starts itself the moment userland succeeds; without it the panel comes
+     up idle and you tap RUN ALL. Both checkboxes are read fresh on every load and are
+     never persisted. -->
 <a class="btn" id="btnsctest"
-   href="p2jb.html?go=1&amp;sc=1&amp;v=138"
+   href="p2jb.html?go=1&amp;sc=1&amp;v=139"
    tabindex="0">Syscall test</a>
+
+<div id="scopts" style="margin:10px auto 0;max-width:640px;text-align:left;font-size:13px;line-height:1.9;color:#a2a2a6">
+    <label style="display:block;cursor:pointer">
+        <input type="checkbox" id="scauto">
+        auto-run tests after userland (otherwise: panel comes up idle, tap RUN ALL)
+    </label>
+    <label style="display:block;cursor:pointer">
+        <input type="checkbox" id="scarm">
+        UNSAFE: arm the Bagagwa UAF (num=2) after the safe suite &mdash; a failed run is a
+        POWER CYCLE, not a reload. Detection is JS-readable: sentinel decs, WAKE name
+        strings, witness blocks.
+    </label>
+</div>
+<script>
+(function () {
+    var a = document.getElementById("btnsctest");
+    var cAuto = document.getElementById("scauto");
+    var cArm = document.getElementById("scarm");
+    function sync() {
+        if (!a) return;
+        var h = "p2jb.html?go=1&sc=1&v=139";
+        if (cAuto && cAuto.checked) h += "&scauto=1";
+        if (cArm && cArm.checked) h += "&arm=1";
+        a.href = h;
+    }
+    if (cAuto) cAuto.addEventListener("change", sync);
+    if (cArm) cArm.addEventListener("change", sync);
+    sync();
+})();
+</script>
 
 
 <div id="msg"></div>

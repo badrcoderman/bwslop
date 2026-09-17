@@ -724,10 +724,16 @@ submit's ids are raw handles, whether the pending-request wait answers (vs the E
 all-zero and num=1-on-nothing calls gave), and it exercises cancel/delete. This is the
 last cheap read-only measurement before anything destructive.
 
-**C. Only after A, B, and B2, and only with explicit operator approval:** build the arming
-payload on PSAITO's structure (socketpair pending read → submit → node/witness setup →
-fire with `mode=0`), with the sentinel detection copied. Model it on
-`payloads/bagagwa_uaf_1320.js` **but re-derive** nothing from its offsets.
+**C. BUILT (behind a gate, at the operator's explicit request).** The arming payload now
+EXISTS as the "UAF arm (UNSAFE)" tile on PSAITO's structure (live pending reads → armed
+`aio_multi_wait(ids, num=2, states=NULL, mode=0, timeout=0)` → reclaim-before-wake with
+WAKE0000-3 + SPRAY osems → wake-write → JS-readable detection ladder). It renders and runs
+ONLY when `?arm=1` is in the URL, which index.html appends only while the operator's
+**UNSAFE checkbox** is ticked (fresh on every load, never persisted). The harness asserts
+the gate both ways: without `arm=1` no `num>=2` call can ever fire (test_convention 8b);
+with it, EXACTLY ONE armed call with the measured ABI reaches the kernel model (scenario 8,
+which also carries a real memory model so the tile's detector integrity self-check is
+eXercised honestly). **A failed armed run is still a POWER CYCLE, not a reload.**
 
 **D. Then, separately, the leak (727) and the osem conversion.** Treat both as UNKNOWN.
 
@@ -748,10 +754,11 @@ Read it as: **measuring and arming are within reach; a working jailbreak is not 
 
 ## 13. DO-NOT-DO list
 
-1. **Do not wire the UAF to a button.** No disarm exists: cleanup unlinks only via
-   `node->owner`, so `req->waiters` for `0..N-2` dangles into objects this process does not
-   own. A failed armed run is a **power cycle, not a reload**. There is no `null_rthdr()`
-   equivalent.
+1. **The UAF is wired ONLY behind `?arm=1`** (the index.html UNSAFE checkbox). Do not
+   widen that gate to a plain button, a persisted flag, or an always-on tile. No disarm
+   exists: cleanup unlinks only via `node->owner`, so `req->waiters` for `0..N-2` dangles
+   into objects this process does not own. A failed armed run is a **power cycle, not a
+   reload**. There is no `null_rthdr()` equivalent.
 2. **Do not paste `offsets/kernel/data.js`** (§8.2) or port OzRviju's struct table (§8.3).
 3. **Do not try to read libkernel *text*** to signature-scan. The libraries are xotext;
    reading code through the R/W primitive faults and kills the process. Read the *stack*.

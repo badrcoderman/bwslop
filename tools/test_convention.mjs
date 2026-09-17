@@ -82,6 +82,8 @@ function run(name, over, opts) {
     let wedged = false;
     const w = {
         fw_str: "13.60",
+        location: { search: opts.search !== undefined ? opts.search : "?sc=1&scauto=1" },   // auto-run only behind scauto
+
         localStorage: {
             getItem: (key) => (key in storage ? storage[key] : null),
             setItem: (key, v) => { storage[key] = String(v); },
@@ -184,6 +186,8 @@ const check = (name, cond, extra) => {
     const calls = [];
     const w = {
         fw_str: "13.60",
+        location: { search: "?sc=1&scauto=1" },   // auto-run only behind scauto
+
         localStorage: { getItem: (key) => (key in storage ? storage[key] : null), setItem: (key, v) => { storage[key] = String(v); }, removeItem: (key) => { delete storage[key]; } },
         send_notification() {}, flushMark() {}, syncMark() {},
         malloc: () => 0x100000n, write_buffer() {}, alloc_string: () => 0x100000n,
@@ -315,6 +319,98 @@ const check = (name, cond, extra) => {
     check("6b: no unproven syscall is ever on the wire", !calls.includes("0x7ff"), calls.join(","));
     check("6b: no WEDGED marker anywhere in the log", !log.includes("WEDGED-BEFORE"));
     check("6b: T0 still reaches its verdict", log.includes("T0-VERDICT"));
+}
+
+/* 7. AUTO-RUN GATE -- without ?scauto=1 the panel comes up IDLE after userland: no tile
+ *      runs, and the operator must tap RUN ALL. */
+{
+    const { log } = await run("autorun-off", { "0x297": 0x16n }, { search: "?sc=1" });
+    check("7: no tile ran without scauto (no RUN ALL header)", !log.includes("=== RUN ALL ==="), log.slice(-300));
+    check("7: the panel says it is idle and waiting", log.includes("Auto-run is OFF"));
+    check("7: userland still came up (the boot itself completed)", log.includes("Bagagwa panel up on 13.60"));
+    const { log: log2 } = await run("autorun-on", { "0x297": 0x16n }, { search: "?sc=1&scauto=1" });
+    check("7: scauto=1 still auto-runs", log2.includes("=== RUN ALL ==="), log2.slice(-300));
+}
+
+/* 8. THE ARMED TILE -- behind ?arm=1&scauto=1 it renders, runs LAST, and the model must
+ *      see EXACTLY ONE num>=2 multi_wait (the UAF itself) with a VALID ids array -- the
+ *      whole point of the exercise. This scenario carries a REAL MEMORY MODEL: malloc
+ *      hands out distinct addresses and write/read round-trip, so the tile's detector
+ *      integrity self-check passes honestly and the verdict must be NO OBSERVABLE EFFECT
+ *      (the model kernel never decrements the sentinels). A stub read64() would trip the
+ *      self-check and the tile would (correctly) refuse to arm -- which is exactly what
+ *      the first draft of this scenario got wrong. */
+{
+    const storage = {};
+    const els = {};
+    const doc = { head: makeEl("head"), body: makeEl("body"), createElement: (t) => makeEl(t), getElementById: (id) => (els[id] ||= makeEl("div")) };
+    const T = table({});
+    const k = (nr) => "0x" + nr.toString(16);
+    const calls = [];
+    let armedSeen = 0;
+    /* -- the memory model -- */
+    let nextAddr = 0x100000n;
+    const mem = new Map();                                  // Number(addr) -> Uint8Array
+    const LO = 0x100000n, HI = 0x300000n;
+    const inRange = (p) => p !== undefined && p >= LO && p < HI;
+    const memGet = (addr, len) => {
+        const a = Number(addr);
+        let b = mem.get(a);
+        if (!b || b.length < len) { b = new Uint8Array(len); mem.set(a, b); }
+        return b;
+    };
+    const w = {
+        fw_str: "13.60",
+        location: { search: "?sc=1&scauto=1&arm=1" },
+        localStorage: { getItem: (key) => (key in storage ? storage[key] : null), setItem: (key, v) => { storage[key] = String(v); }, removeItem: (key) => { delete storage[key]; } },
+        send_notification() {}, flushMark() {}, syncMark() {},
+        malloc: () => { const a = nextAddr; nextAddr += 0x100n; return a; },
+        alloc_string: () => { const a = nextAddr; nextAddr += 0x100n; return a; },
+        write_buffer: (addr, bytes) => { memGet(addr, bytes.length).set(bytes); },
+        read_buffer: (addr, len) => new Uint8Array(memGet(addr, len)),
+        read64: (addr) => { const b = memGet(addr, 8); let v = 0n; for (let i = 7; i >= 0; i--) v = (v << 8n) | BigInt(b[i]); return v; },
+        syscall(nr, a0, a1, a2, a3, a4) {
+            calls.push(k(nr) + "(" + [a0, a1, a2, a3, a4].filter((x) => x !== undefined).join(",") + ")");
+            if (nr === 0x035) return 0x0n;                     // socketpair succeeds
+            if (nr === 0x29D) return 0x0n;                     // submit succeeds
+            if (nr === 0x297) {
+                if (inRange(a0) && a1 !== undefined && BigInt(a1) >= 2n) armedSeen++;   // THE UAF
+                else if (a1 !== undefined && BigInt(a1) >= 2n && !inRange(a0)) throw new Error("num>=2 with an INVALID array -- not even the armed tile may do that");
+                return T[k(nr)];
+            }
+            if (nr === 0x29A || nr === 0x296) return 0x0n;
+            if (nr === 0x004) return 0x1n;
+            if (nr === 0x006) return (a0 === 7n || a0 === 8n) ? 0x0n : 0x9n;
+            if (k(nr) in T) return T[k(nr)];
+            throw new Error("unscripted syscall " + k(nr));
+        },
+        rop_worker: { state: { slot: 0n, fired: 19n, dead: false, stack: 0x0n, kbase: 0n, ctx: 0n, retval: 0n } },
+        P2JB_LK: { "13.60": { slot_expect: 0x1988Bn, syscall_wrapper: 0x1AEB7n, setjmp: 0x1D443n, longjmp: 0x1D49Cn, thread_list: 0x6C218n } },
+    };
+    const ctx = { window: w, document: doc, localStorage: w.localStorage, setTimeout, Date, JSON, Math, console, Uint8Array, Int32Array, Blob: class { constructor() {} }, URL: { createObjectURL: () => "blob:x" } };
+    ctx.globalThis = ctx;
+    vm.createContext(ctx);
+    vm.runInContext(src, ctx, { filename: "bagagwa_probe.js" });
+    const { log } = await new Promise((res) => setTimeout(() => res({ log: storage["bwslop_sc_log"] || "" }), 1600));
+    check("8: arm=1 renders the UNSAFE tile", log.includes("UAF arm (UNSAFE)"), log.slice(-200));
+    check("8: RUN ALL announces ARM MODE", log.includes("ARM MODE"));
+    check("8: detector self-check PASSED before arming", !log.includes("DETECTOR UNRELIABLE"), log);
+    check("8: EXACTLY ONE armed multi_wait (num>=2, valid ids) reached the model", armedSeen === 1, "seen=" + armedSeen);
+    check("8: the armed call used the measured ABI (ids in arg1, num in arg2)",
+        calls.some((c) => { if (!c.startsWith("0x297(")) return false; const p = c.slice(6, -1).split(","); return p[1] === "2" && inRange(BigInt(p[0])); }),
+        calls.filter((c) => c.startsWith("0x297")).join(" "));
+    check("8: the tile woke the pending reads", log.includes("write(wfd,1) wake"), log);
+    check("8: four WAKE reclaim osems were created", log.includes("osem_create(WAKE0000)") && log.includes("osem_create(WAKE0003)"), log);
+    check("8: verdict says no-observable-effect on the model kernel (sentinels untouched)",
+        log.includes("NO OBSERVABLE EFFECT"), log.slice(-500));
+    check("8: notify carried the arm result", log.includes("NOTIFY  ARM:"), log.slice(-500));
+}
+
+/* 8b. WITHOUT ?arm=1 the armed tile must NOT render and NO num>=2 may ever fire. */
+{
+    const { log, calls } = await run("arm-absent", { "0x297": 0x16n });
+    check("8b: no UNSAFE tile without arm=1", !log.includes("UAF arm (UNSAFE)"));
+    check("8b: no num>=2 multi_wait anywhere", !calls.some((c) => c.startsWith("0x297(") && c.split(",")[1] === "2"), calls.join(","));
 }
 
 console.log(fails ? `\n${fails} check(s) FAILED` : "\nall convention scenarios pass");

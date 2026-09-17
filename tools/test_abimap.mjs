@@ -68,6 +68,8 @@ function run(name, opts) {
 
     const w = {
         fw_str: "13.60",
+        location: { search: "?sc=1&scauto=1" },   // probe auto-runs only behind scauto
+
         localStorage: {
             getItem: (k) => (k in storage ? storage[k] : null),
             setItem: (k, v) => { storage[k] = String(v); },
@@ -147,6 +149,8 @@ const check = (name, cond, extra) => {
     const doc = { head: makeEl("head"), body: makeEl("body"), createElement: (t) => makeEl(t), getElementById: (id) => (els[id] ||= makeEl("div")) };
     const w = {
         fw_str: "13.60",
+        location: { search: "?sc=1&scauto=1" },   // probe auto-runs only behind scauto
+
         localStorage: { getItem: (k) => (k in storage ? storage[k] : null), setItem: (k, v) => { storage[k] = String(v); }, removeItem: (k) => { delete storage[k]; } },
         send_notification() {}, flushMark() {}, syncMark() {},
         malloc: () => BUF, write_buffer() {}, alloc_string: () => BUF,
@@ -173,6 +177,8 @@ const check = (name, cond, extra) => {
     const tripwire = { armed: false };
     const w = {
         fw_str: "13.60",
+        location: { search: "?sc=1&scauto=1" },   // probe auto-runs only behind scauto
+
         localStorage: { getItem: (k) => (k in storage ? storage[k] : null), setItem: (k, v) => { storage[k] = String(v); }, removeItem: (k) => { delete storage[k]; } },
         send_notification() {}, flushMark() {}, syncMark() {},
         malloc: () => BUF, write_buffer() {}, alloc_string: () => BUF,
@@ -227,6 +233,8 @@ const check = (name, cond, extra) => {
     const tripwire = { armed: false };
     const w = {
         fw_str: "13.60",
+        location: { search: "?sc=1&scauto=1" },   // probe auto-runs only behind scauto
+
         localStorage: { getItem: (k) => (k in storage ? storage[k] : null), setItem: (k, v) => { storage[k] = String(v); }, removeItem: (k) => { delete storage[k]; } },
         send_notification() {}, flushMark() {}, syncMark() {},
         malloc: () => BUF, write_buffer() {}, alloc_string: () => BUF,

@@ -77,6 +77,8 @@ function run(scenario) {
     const row = { slot_expect: 0x1983B, syscall_wrapper: 0x1AE67, setjmp: 0x1D3F3, longjmp: 0x1D44C, pthread_create: 0x79B0, thread_list: 0x6C218 };
     const w = {
         fw_str: "13.60",
+        location: { search: "?sc=1&scauto=1" },   // probe auto-runs only behind scauto
+
         localStorage: {
             getItem: (k) => (k in storage ? storage[k] : null),
             setItem: (k, v) => { storage[k] = String(v); },

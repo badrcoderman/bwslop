@@ -2095,10 +2095,18 @@ async function main() {
                 // deliberately does NOT load is p2jb.js - or poops's own engine, which the
                 // early return below already skips. Nothing here can write kernel memory.
                 if (Q.get("sc") === "1") {
-                    await loadScript("bagagwa_probe.js?v=138");
+                    await loadScript("bagagwa_probe.js?v=139");
+                    /* Forward the operator's switches to the probe. ?arm=1 renders and runs
+                     * the UNSAFE UAF tile (a failed armed run is a power cycle); ?scauto=1
+                     * makes RUN ALL start itself after userland. Not forwarded = off, and
+                     * neither value is ever persisted. */
+                    const scExtras = [];
+                    if (Q.get("arm") === "1") scExtras.push("ARM=1 (UNSAFE tile enabled)");
+                    if (Q.get("scauto") === "1") scExtras.push("AUTORUN=1");
                     flushMark("SC-PANEL-LOADED",
                         "executor up; p2jb.js/poops-engine NOT loaded (firmware "
-                        + window.fw_str + ")");
+                        + window.fw_str + ")"
+                        + (scExtras.length ? "; " + scExtras.join(", ") : "; read-only suite"));
                 } else {
                     await loadScript("p2jb.js?v=128");          // exploit module (unchanged, sync)
                     flushMark("P2JB-LOADED", "adapter+module on poopsploit primitives");
