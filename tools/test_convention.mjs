@@ -69,6 +69,7 @@ function table(over) {
         "0x69": 0x16n,          // setsockopt(IPV6_RTHDR) -> EINVAL (13.x validator)
         "0x6a": 0x16n,          // getsockopt(IPV6_RTHDR) -> EINVAL
         "0xc2": 0x16n,          // getrlimit     -> EINVAL
+        "0x14b": 0x0n,          // sched_yield   -> 0 (settle loops call it hundreds of times)
     };
     return Object.assign(base, over);
 }

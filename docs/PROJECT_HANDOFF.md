@@ -807,6 +807,32 @@ Wamphyre/PSAITO commit e0f3857's evidence-audit work on 13.x option validation.)
 - **Their simulator discipline** (kernel model + tripwires) matches our harness approach;
   their `sim: hang-expected` payload marker is a good pattern if we ever add payloads.
 
+### The BragaTy mirror (teste-exploit-ps5) — what diffing it against pArm taught
+
+`BragaTy/teste-exploit-ps5` is a verbatim mirror of Wamphyre/PSAITO (commits 2026-09-15:
+"Update menu.js" / "teste 3"; payloads are byte-identical PSAITO files incl.
+`bagagwa_uaf_1320.js` v44bd1e95). Diffing it gave three concrete fixes, all shipped:
+
+1. **TIMING — the biggest one.** Their payload yields `sched_yield` (331 = `0x14B`, a
+   proven 13.60 stub in our map) **200x after the armed shot, 500x after the reclaim,
+   500x after the wake**. The AIO completion and the waker run on KERNEL worker threads;
+   a JS thread that never yields reads the detectors before the waker has run at all.
+   Our 11:21 ARM run read detectors immediately — part of its "no observable effect" is
+   now attributable to that. We ship `settle(n)`: silent yield loops at all three points.
+2. **cancel/delete take THREE args: (ids, num, states)** — our old `(ids, 1, 0)` calls
+   EFAULTed for the same states=NULL reason as the armed call. Fixed in pArm (num=2,
+   covering both requests) and pLive (num=1).
+3. **Their ids array is `4*NREQ` bytes and they read ids via `read32`** — ours is 0x10
+   and read via read64. Both saw ids, so either works; kept ours, noted the difference.
+
+Also noted: their F2 builds a `node` control block with a VALID mtx_cell pointer (never
+NULL) — our allocCell does the same; their detectors are the same sentinels/witnesses;
+their reclaim osems are deliberately left alive (double-free safety) — same as ours.
+
+Harness lesson (cost us a green->red->green cycle): `settle()` must be SILENT — 1300 S()
+rows flushed the panel log buffer and evicted the very tile output the scenarios assert
+on. `S()` now honors `quiet` on the throw path too, and the kernel models know `0x14b`.
+
 ### pLive fixes shipped with T2c (both caught by the harness)
 
 1. The wait now passes a real zeroed states buffer (arg3) — same EFAULT lesson as ARM.
