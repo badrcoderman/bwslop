@@ -56,6 +56,11 @@ function table(over) {
         "0x2af": 0x0n,          // pipe2         -> 0 (success)
         "0x29e": 0x16n,         // aio_init      -> EINVAL
         "0x297": 0x16n,         // aio_multi_wait-> EINVAL
+        "0x29d": 0x16n,         // aio_submit_cmd-> EINVAL
+        "0x29a": 0x16n,         // aio_multi_cancel -> EINVAL
+        "0x296": 0x16n,         // aio_multi_delete -> EINVAL
+        "0x35": 0x16n,          // socketpair    -> EINVAL (no pair by default)
+        "0x4": 0x16n,           // write         -> EINVAL (refuses by default)
         "0x225": 0x16n,         // osem_create   -> EINVAL
         "0x227": 0xen,          // osem_open     -> EFAULT
         "0x228": 0x3n,          // osem_close    -> ESRCH
@@ -125,7 +130,8 @@ function run(name, over, opts) {
     vm.createContext(ctx);
     vm.runInContext(src, ctx, { filename: "bagagwa_probe.js" });
 
-    /* runAll is async (60ms between tiles); read the persisted panel log after it settles. */
+    /* runAll is async (60ms between tiles); read the persisted panel log after it settles.
+     * 1600ms started truncating after the live-request tile joined the RUN ALL sequence. */
     return new Promise((res) => setTimeout(() => res({ log: storage["bwslop_sc_log"] || "", calls }), 1600));
 }
 
@@ -161,6 +167,71 @@ const check = (name, cond, extra) => {
         log.includes("osem_create(nameCopy,0,1,1,0)") && log.includes("NO create shape"));
     check("1: osem never sent an errno-sized rax to the epilogue",
         !calls.includes("0x228(22)"), calls.join(","));
+    /* The live-request tile must have run inside RUN ALL and NEVER produced a num>=2 wait. */
+    check("1: live-request tile ran", log.includes("T3b-VERDICT"), log);
+    check("1: live request says num=1 can never reproduce the UAF",
+        log.includes("num=1 can never reproduce the UAF") || log.includes("needs num>=2 in ONE call"));
+}
+
+/* 1b. the live-request tile end to end: socketpair ok, submit ok, wait num=1, cleanup --
+ *      and the numbers the kernel model records must show num<=1 on every 0x297 call. */
+{
+    const storage = {};
+    const els = {};
+    const doc = { head: makeEl("head"), body: makeEl("body"), createElement: (t) => makeEl(t), getElementById: (id) => (els[id] ||= makeEl("div")) };
+    const T = table({});
+    const k = (nr) => "0x" + nr.toString(16);
+    const calls = [];
+    const w = {
+        fw_str: "13.60",
+        localStorage: { getItem: (key) => (key in storage ? storage[key] : null), setItem: (key, v) => { storage[key] = String(v); }, removeItem: (key) => { delete storage[key]; } },
+        send_notification() {}, flushMark() {}, syncMark() {},
+        malloc: () => 0x100000n, write_buffer() {}, alloc_string: () => 0x100000n,
+        read_buffer: () => new Uint8Array(new Int32Array([7, 8]).buffer),
+        read64: () => 0x777n,
+        syscall(nr, a0, a1, a2, a3, a4) {
+            calls.push(k(nr) + "(" + [a0, a1, a2, a3, a4].filter((x) => x !== undefined).join(",") + ")");
+            if (nr === 0x035) return 0x0n;                     // socketpair succeeds
+            if (nr === 0x29D) return 0x0n;                     // submit succeeds
+            if (nr === 0x297) {                                 // multi_wait
+                if (a1 !== undefined && BigInt(a1) >= 2n) throw new Error("TRIPWIRE: multi_wait num>=2 on the wire");
+                return T[k(nr)];                                // 0x16 EINVAL (id not ours yet)
+            }
+            if (nr === 0x29A || nr === 0x296) return 0x0n;      // cancel/delete succeed
+            if (nr === 0x004) return 0x1n;                      // write completes a read
+            if (nr === 0x006) return (a0 === 7n || a0 === 8n) ? 0x0n : 0x9n;
+            if (k(nr) in T) return T[k(nr)];
+            throw new Error("unscripted syscall " + k(nr));
+        },
+        rop_worker: { state: { slot: 0n, fired: 19n, dead: false, stack: 0x0n, kbase: 0n, ctx: 0n, retval: 0n } },
+        P2JB_LK: { "13.60": { slot_expect: 0x1988Bn, syscall_wrapper: 0x1AEB7n, setjmp: 0x1D443n, longjmp: 0x1D49Cn, thread_list: 0x6C218n } },
+    };
+    const ctx = { window: w, document: doc, localStorage: w.localStorage, setTimeout, Date, JSON, Math, console, Uint8Array, Int32Array, Blob: class { constructor() {} }, URL: { createObjectURL: () => "blob:x" } };
+    ctx.globalThis = ctx;
+    vm.createContext(ctx);
+    vm.runInContext(src, ctx, { filename: "bagagwa_probe.js" });
+    const { log } = await new Promise((res) => setTimeout(() => res({ log: storage["bwslop_sc_log"] || "" }), 1600));
+    check("1b: socketpair proven live (fds named)", log.includes("T3b-socketpair") && log.includes("live pair"), log);
+    check("1b: submit ok with pending reads", log.includes("2 pending MULTI_READ requests"), log);
+    check("1b: the num=1 wait answered", log.includes("multi_wait(ids, num=1)"), log);
+    check("1b: cleanup ran (cancel+delete)", log.includes("cancel=0x0") && log.includes("delete=0x0"), log);
+    check("1b: verdict distinguishes measured vs never-armed",
+        log.includes("LIVE-REQUEST REACHABILITY MEASURED") && log.includes("That step stays behind your explicit go"), log);
+    /* THE tripwire, parsed from the recorded argument lists: for every 0x297 call that has
+     * TWO nonzero arguments in array+num positions, num must be <= 1. Position matters --
+     * in the ABI sweep the BUFFER itself lands in a1 (row arg2), so treating a1 as num
+     * unconditionally misreads the sweep. The armed-bug condition is a VALID array (== the
+     * malloc stub address 0x100000) in one register AND a num >= 2 in another; the model
+     * above already throws if the probe ever constructs that call. */
+    const mallocAddr = 0x100000n;
+    const badWait = calls.filter((c) => {
+        if (!c.startsWith("0x297(")) return false;
+        const parts = c.slice(6, -1).split(",").map((s) => BigInt(s || "0"));   // skip "0x297("
+        const hasValidArray = parts.some((v) => v === mallocAddr);
+        const nums = parts.filter((v) => v !== mallocAddr && v >= 2n);
+        return hasValidArray && nums.length > 0;
+    });
+    check("1b: TRIPWIRE -- no valid array with num>=2 reached the kernel", badWait.length === 0, calls.join(","));
 }
 
 /* 2. raw convention, firmware PATCHED -- the regression that mattered.
@@ -220,6 +291,20 @@ const check = (name, cond, extra) => {
         q.log.includes("handle CANDIDATE") && q.log.includes("ESRCH") && q.log.includes("EPERM"), q.log);
     check("6c: verdict names the name/attr contract as the open question",
         q.log.includes("name/attr CONTRACT") && q.log.includes("Next differential"));
+}
+
+/* 6c. THE 0x80 CUTOFF REGRESSION -- the 20:13 hardware run's evidence: 0xa6 is a handle
+ *      candidate (delete(0xa6)=0 on hardware) and must reach the epilogue; 0x22 stays an
+ *      errno. The first cut used 0x100 and masked the likely-real handle. */
+{
+    const r = await run("osem-band-a6", { "0x225": 0xa6n, "0x226": 0x0n });
+    check("6c: 0xa6 reaches the epilogue (cutoff is 0x80)",
+        r.log.includes("PROVEN: osem_delete returned 0"), r.log);
+    const s = await run("osem-band-sub", { "0x225": 0x79n, "0x226": 0x3n });
+    check("6c: 0x79 (below 0x80) is still declared an errno", s.log.includes("an errno, not a handle"), s.log);
+    const t = await run("osem-band-close", { "0x225": 0xa7n, "0x226": 0x3n, "0x228": 0x0n });
+    check("6c: candidate proven by close (delete refused first) is accepted",
+        t.log.includes("PROVEN: osem_close returned 0"), t.log);
 }
 
 /* 6b. THE WEDGE REGRESSION -- the exact hardware failure from 2026-09-16: if anything ever

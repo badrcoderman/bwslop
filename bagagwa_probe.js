@@ -784,6 +784,101 @@
         return { ok: true, summary: wait.errName || "ok" };
     }
 
+    /* T3b -- the first tile that puts a LIVE AIO REQUEST into the kernel, still arming-safe.
+     *
+     * Everything before this tile called aio_multi_wait with arrays the kernel rejected or
+     * could not act on. The chain itself needs requests that are LIVE AND WAITING: a waiter
+     * node is only linked onto a request's waiter list while that request is in flight. This
+     * tile builds exactly that, following PSAITO's verified recipe (socketpair + pending
+     * MULTI_READ), and then waits on ONE of the ids with num=1.
+     *
+     * WHY num=1 IS THE SAFETY WALL (spelled out, this is the closest any tile gets to the bug):
+     * the mode-0 corruption needs ONE node linked onto TWO OR MORE requests' waiter lists,
+     * which only happens when a single aio_multi_wait call carries num >= 2 -- the walk then
+     * writes node->owner once per request, so requests 0..N-2 keep pointers past cleanup.
+     * num=1 links the node onto exactly ONE request, cleanup unlinks that one via
+     * node->owner, and the free is paired. No call in this tile ever sets num > 1, and that
+     * is enforced by the harness tripwire, not by discipline.
+     *
+     * Order matters: submit BEFORE wait (the requests must be pending when the wait links
+     * their node), and write AFTER the wait returned -- writing first would complete the
+     * reads, the requests would stop waiting, and the wait would have nothing to link.
+     * Cleanup: cancel then delete with the SAME array pointer and num=1 -- leaving pending
+     * AIO requests behind is itself a leak the next tile would inherit. */
+    function pLive() {
+        try {
+            /* The safety statement is UNCONDITIONAL -- every verdict path below carries it,
+             * including the early refusals, so a truncated run never loses it. */
+            var SAFETY = " num=1 can never reproduce the UAF: the mode-0 corruption needs ONE node "
+                + "linked onto TWO OR MORE requests' waiter lists, which only happens when a single "
+                + "call carries num>=2 -- no call in this tile ever does.";
+            /* socketpair(AF_UNIX, SOCK_STREAM, 0, fds) -- syscall 0x35 on 13.60. The pair
+             * is the live request source: nothing is written until the end, so every
+             * MULTI_READ stays pending. */
+            var sfds = zeros(malloc(0x10), 0x10);
+            var sp = S("socketpair(AF_UNIX,SOCK_STREAM)", 0x035, [1n, 1n, 0n, sfds]);
+            if (sp.ret === undefined || B(sp.ret) !== 0n) {
+                out("T3b-VERDICT", "socketpair refused (" + (sp.errName || (sp.ret === undefined ? sp.threw : hex(sp.ret)))
+                    + ") -- no live request source; the chain's stage 0 starts here, so this needs settling first." + SAFETY, "warn");
+                return { ok: true, summary: "no socketpair" };
+            }
+            var sfd = new Int32Array(window.read_buffer(sfds, 8).buffer, 0, 2);
+            out("T3b-socketpair", "rfd=" + sfd[0] + " wfd=" + sfd[1] + " -- live pair; nothing written until the wake step", "dim");
+
+            /* request structs: 0x28 bytes, read fd at +0x20 (PSAITO's MULTI_READ layout).
+             * ids receives the request handles the kernel assigns at submit. */
+            var NREQ = 2;
+            var reqs = zeros(malloc(0x28 * NREQ), 0x28 * NREQ);
+            for (var ri = 0; ri < NREQ; ri++) {
+                window.write_buffer(reqs + BigInt(ri * 0x28 + 0x20), new Uint8Array([sfd[0] & 0xff, (sfd[0] >> 8) & 0xff, 0, 0, 0, 0, 0, 0]));
+            }
+            var ids = zeros(malloc(0x10), 0x10);
+            var sub = S("aio_submit_cmd(MULTI_READ,n=2,prio=3)", 0x29D, [0x1001n, reqs, 2n, 3n, ids]);
+            if (sub.ret === undefined || B(sub.ret) !== 0n) {
+                out("T3b-VERDICT", "aio_submit_cmd refused (" + (sub.errName || (sub.ret === undefined ? sub.threw : hex(sub.ret)))
+                    + ") -- the request layout (0x28, fd@+0x20) or the cmd/priority encoding is wrong; "
+                    + "this is the stage the writeup never fully documents, and it is measurable without arming." + SAFETY, "warn");
+                S("close w", 0x006, [BigInt(sfd[0])]);
+                S("close r", 0x006, [BigInt(sfd[1])]);
+                return { ok: true, summary: "submit refused" };
+            }
+            var id0 = window.read64(ids), id1 = window.read64(ids + 8n);
+            out("T3b-submit", "ok -- 2 pending MULTI_READ requests, ids=[" + hex(B(id0)) + ", " + hex(B(id1)) + "]", "ok");
+
+            /* THE wait -- one id, num=1. Links at most one node onto one waiter list. */
+            var w = S("aio_multi_wait(ids[0], num=1)", 0x297, [ids, 1n, 0n, 0n, 0n]);
+            out("T3b-wait", "aio_multi_wait(ids, num=1) -> " + (w.ret === undefined ? w.threw : hex(w.ret))
+                + (w.errName ? " (" + w.errName + ")" : "")
+                + " -- num=1 can never reproduce the UAF (that needs num>=2 in ONE call)", "dim");
+
+            /* Wake: complete the pending reads so nothing stays armed behind us. */
+            var one = malloc(0x10);
+            window.write_buffer(one, new Uint8Array([0x41]));
+            S("write(wfd,1)", 0x004, [BigInt(sfd[1]), one, 1n]);
+
+            /* Cleanup: cancel then delete with the SAME pointer and num=1. */
+            var c = S("aio_multi_cancel(ids,1)", 0x29A, [ids, 1n, 0n], true);
+            var d = S("aio_multi_delete(ids,1)", 0x296, [ids, 1n, 0n], true);
+            S("close w", 0x006, [BigInt(sfd[0])]);
+            S("close r", 0x006, [BigInt(sfd[1])]);
+
+            out("T3b-VERDICT", "LIVE-REQUEST REACHABILITY MEASURED on " + FW + ": socketpair ok, submit ok (2 pending reads), "
+                + "multi_wait(num=1) answered " + (w.ret === undefined ? w.threw : hex(w.ret)) + (w.errName ? " (" + w.errName + ")" : "")
+                + ", cancel=" + (c.ret === undefined ? c.threw : hex(c.ret)) + (c.errName ? " (" + c.errName + ")" : "")
+                + ", delete=" + (d.ret === undefined ? d.threw : hex(d.ret)) + (d.errName ? " (" + d.errName + ")" : "")
+                + ". This settles what the armed call will see: whether ids from submit are raw handles "
+                + "(wait ESRCH-free) or need an indirection, and which of mode/timeout positions the "
+                + "kernel accepts. What it can NEVER do is arm the UAF -- every call here had num<=1, "
+                + "and the corruption needs num>=2 in ONE call. That step stays behind your explicit go.", "ok");
+            notify("bagagwa T3b live request: wait=" + (w.ret === undefined ? "threw" : hex(w.ret)) + " on " + FW);
+            chip(elVerdict, "ok", "live request ok (num=1)");
+            return { ok: true, summary: "live request measured" };
+        } catch (e) {
+            out("T3b-VERDICT", "THREW " + String((e && e.message) || e).slice(0, 90) + " -- if a pending request outlived this tile, a console REBOOT (not reload) clears it", "err");
+            return { ok: false, summary: "threw" };
+        }
+    }
+
     /* T6 -- the aio_multi_wait ABI map. Read-only, and ARMING-SAFE BY CONSTRUCTION.
      *
      * Three implementations disagree on this call's argument order -- Bagagwa_chain uses
@@ -1062,13 +1157,15 @@
             ];
             var tried = [];
 
-            /* Handle-or-errno, by RANGE first: ps5 observation is that errno values cluster
-             * below 0x80 (0x16 EINVAL, 0xa6 would be EPERM+0x64 -- suspiciously round), while
-             * object handles come from an allocator space far above it. A rax above the
-             * cutoff is PRESUMED a handle and must be PROVEN by the epilogue below; a rax
-             * below it is presumed an errno and is not sent to open/close/delete at all --
-             * which is what made the old flow chase a fake handle through three syscalls. */
-            var HANDLE_MIN = 0x100n;
+            /* Handle-or-errno, by RANGE first. The cutoff is 0x80, from real hardware: the
+             * 20:13 run returned 0xa6 and osem_delete(0xa6) -> 0 while delete(0x16) -> ESRCH,
+             * so 0xa6 behaved like a LIVE OBJECT, not an errno (and the later run returned
+             * 0xa6 then 0xa7 for successive creates -- an allocator handing out handles, not
+             * a static errno table; PS4/PS5 errno values top out near 0x4e = ENOSYS anyway).
+             * The first 0x80 cutoff here was too wide and masked a likely-real handle. A rax
+             * at or above the cutoff is a HANDLE CANDIDATE and must be PROVEN by the epilogue
+             * below; below it is an errno and is never sent to open/close/delete. */
+            var HANDLE_MIN = 0x80n;
             for (var si = 0; si < SHAPES.length; si++) {
                 var cr = S(SHAPES[si].tag, 0x225, SHAPES[si].args);
                 if (cr.ret === undefined) { tried.push(SHAPES[si].tag + "=threw"); continue; }
@@ -1083,7 +1180,8 @@
                      * handle both refuse and nothing is leaked. Close is attempted only when
                      * delete did not consume the object. */
                     var d = S("osem_delete", 0x226, [h]);
-                    if (d.ret !== undefined && B(d.ret) === 0n) {
+                    var dret = (d.ret !== undefined) ? B(d.ret) : -1n;
+                    if (dret === 0n) {
                         out("T4-create", "handle=" + hex(h) + " via '" + SHAPES[si].tag + "' (" + SHAPES[si].from
                             + ") -- PROVEN: osem_delete returned 0 (real handle, consumed)", "ok");
                         out("T4-VERDICT", "osem_create returned a REAL handle: " + hex(h) + " via "
@@ -1096,6 +1194,7 @@
                         chip(elVerdict, "ok", "osem target reachable");
                         return { ok: true, summary: "handle via " + SHAPES[si].tag };
                     }
+                    /* Here dret !== 0n is guaranteed: the dret === 0n case returned above. */
                     var c = S("osem_close", 0x228, [h]);
                     if (c.ret !== undefined && B(c.ret) === 0n) {
                         out("T4-create", "handle=" + hex(h) + " via '" + SHAPES[si].tag + "' (" + SHAPES[si].from
@@ -1108,9 +1207,9 @@
                         return { ok: true, summary: "handle via " + SHAPES[si].tag };
                     }
                     out("T4-create", "shape '" + SHAPES[si].tag + "' returned " + hex(h)
-                        + " (above the errno band, so a handle CANDIDATE) but the epilogue refused it: "
-                        + "delete=" + (d.ret === undefined ? "threw" : hex(d.ret) + " (" + (d.errName || errnoHint(d.ret) || "value") + ")")
-                        + ", close=" + (c.ret === undefined ? "threw" : hex(c.ret) + " (" + (c.errName || errnoHint(c.ret) || "value") + ")")
+                        + " (at/above the 0x80 cutoff, so a handle CANDIDATE) but the epilogue refused it: "
+                        + "delete=" + (d.ret === undefined ? "threw" : (dret === 0n ? "0" : hex(dret) + " (" + (d.errName || errnoHint(dret) || "value") + ")"))
+                        + (dret !== 0n ? ", close=" + (c.ret === undefined ? "threw" : hex(c.ret) + " (" + (c.errName || errnoHint(c.ret) || "value") + ")") : " (skipped -- delete already consumed the object; close-then-delete is the documented double-free)")
                         + " -- not proven; trying the next shape", "warn");
                     continue;
                 }
@@ -1123,13 +1222,16 @@
             }
 
             out("T4-VERDICT", "the family EXISTS (it answered instead of returning ENOSYS) but NO create "
-                + "shape yielded a proven handle: " + tried.join(", ") + ". Values below 0x100 were "
-                + "errnos and were never sent to the epilogue; candidates above it were refused by "
-                + "delete/close. This is NOT a kernel refusal and NOT 'osem is patched' -- the "
-                + "remaining unknowns are the name/attr CONTRACT (does create want its own copy of "
-                + "the name, is attr a template or a length, which of the two 1s is mode vs flags) "
-                + "and whether create needs a namespace that only exists after some other init. "
-                + "Next differential: vary ONE argument at a time from the best shape above.", "warn");
+                + "shape yielded a proven handle: " + tried.join(", ") + ". Values below 0x80 were "
+                + "errnos and were never sent to the epilogue; candidates at/above it were refused by "
+                + "delete/close (delete first -- close-then-delete is a double-free on a real object). "
+                + "If NO shape ever crossed the cutoff, the remaining unknowns are the name/attr CONTRACT "
+                + "(does create want its own copy of the name, is attr a template or a length, which of "
+                + "the two 1s is mode vs flags) and whether create needs a namespace that only exists "
+                + "after some other init. If 0xa6/0xa7-class values were refused by the epilogue, the "
+                + "refusal ITSELF is data: a handle that deletes nonzero but is accepted by another "
+                + "operation would mean the refcount/name contract differs. Next differential: vary ONE "
+                + "argument at a time from the best shape above.", "warn");
             notify("bagagwa T4 osem answered but refused every shape");
             return { ok: true, summary: "present, no handle" };
         } catch (e) {
@@ -1244,6 +1346,12 @@
             id: "aio", label: "AIO reach", run: pAio,
             desc: "aio_init and aio_multi_wait with ALL-ZERO arguments. num=0 cannot link a "
                 + "waiter list, so this cannot arm the UAF. THE decisive test.",
+        },
+        {
+            id: "live", label: "AIO live request", run: pLive,
+            desc: "Creates a LIVE pending AIO request (socketpair + pending MULTI_READ) and "
+                + "waits on it with num=1. num=1 can never reproduce the UAF (that needs "
+                + "num>=2 in ONE call). Measures what the armed call will see.",
         },
         {
             id: "abimap", label: "ABI map", run: pAbiMap,

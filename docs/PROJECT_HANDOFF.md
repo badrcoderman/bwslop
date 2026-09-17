@@ -606,18 +606,28 @@ Bagagwa_chain calls `(name, attr)` while PSAITO calls `(name,0,1,1,0)` — anoth
 ABI disagreement.)
 
 **UPDATE (20:13 hardware run): the 5-arg shape was sent and answered `0xa6 = 166` — above
-any plausible errno band (max seen in practice is ENOSYS=0x4e). The tile now classifies by
-RANGE first (`>= 0x100` ⇒ handle CANDIDATE, below ⇒ errno, never sent to the epilogue) and
-proves candidates by `osem_delete(candidate) == 0` (the 20:13 run's `delete(0xa6) -> 0x0`
-vs `delete(0x16) -> 0x3 ESRCH` differential), with `close` only as a fallback and only when
-delete did not consume the object — `close` then `delete` on a genuine handle is the
-documented DOUBLE-FREE (close frees at refcount 0, delete frees again). The run left the
-verdict at "no proven handle" only because the OLD proof heuristic was `close == 0` alone
-and it read `close(0xa6) -> 0x1 EPERM` as disproof. The delete differential says otherwise:
+any plausible errno band (max seen in practice is ENOSYS=0x4e). The tile classifies by
+RANGE first (**cutoff `0x80`** — raised from the first draft's `0x100`, which MASKED a
+likely-real handle; see below) and proves candidates by `osem_delete(candidate) == 0` (the
+20:13 run's `delete(0xa6) -> 0x0` vs `delete(0x16) -> 0x3 ESRCH` differential), with
+`close` only as a fallback and only when delete did not consume the object — `close` then
+`delete` on a genuine handle is the documented DOUBLE-FREE (close frees at refcount 0,
+delete frees again). The run left the verdict at "no proven handle" only because the OLD
+proof heuristic was `close == 0` alone and it read `close(0xa6) -> 0x1 EPERM` as disproof.
+The delete differential says otherwise:
 **`0xa6` behaved like a real handle and the 128-zone allocation works from our executor.**
 The tile now proves this in one run and stops at the first shape that passes. Open
 questions it reports honestly: the name contract (own copy vs borrowed pointer — the tile
 now tries both), attr semantics, and why close says EPERM on a live handle.
+
+**SECOND UPDATE (22:12 hardware run): `osem_create(name,0,1,1,0)` → `0xa6` and
+`osem_create(nameCopy,0,1,1,0)` → `0xa7` — successive creates returned successive handles,
+which is an ALLOCATOR handing out objects, not a static errno table. Combined with
+`delete(0xa6)=0` from 20:13, the `0x80` cutoff is the right line: handles live at/above
+it, errnos below. The 22:12 run's tile still carried the `0x100` cutoff and declared both
+"below the handle band" — that masking is now fixed, and a future run should PROVE the
+handle via the delete-first epilogue. If the epilogue refuses a `0xa6`-class value, that
+refusal is itself data (recorded in the verdict), not silence.**
 
 ### 11.5 PSAITO's payload structure — worth reading in full
 
@@ -667,19 +677,54 @@ can (§6.2). That is our structural advantage and it matters for the leak stage.
 
 ---
 
-## 12. NEXT ACTIONS — in order, and why
+### 11.7 The 22:12 hardware run — ABI measured, osem allocator behaviour
 
-**A. Fix `osem_create` to five arguments `(name, 0, 1, 1, 0)` in the T5 tile.**
-Cheapest test in the project. If it returns a usable handle (proven by `close()==0`), we
-have confirmed that *kernel-side 128-zone allocation works from our executor* — which is
-the prerequisite for the reclaim stage and the first real step past "the syscall answers".
 
-**B. Run the ABI map tile on the console to confirm `(ids, num)` on 13.60.**
-Non-destructive, ~37 calls, seconds. PSAITO's answer is from 13.20; this makes it 13.60.
-If phase 1 corroborates from the *num* side (expected, since our baseline was `EINVAL` ⇒
-`num==0` is rejected first), that is the expected reading, not a problem.
+The 22:12 run is the most complete yet (8/8 tiles). Two results matter:
 
-**C. Only after A and B, and only with explicit operator approval:** build the arming
+**1. The ABI pair is MEASURED on 13.60, not inherited.** The matrix decoded column-wise:
+all four EFAULTs sit in the arg2 **column** with `num=1` — i.e. `num=1` is what activates
+the derefs; row arg2 (huge value in num) stayed EINVAL ⇒ a num **domain check** exists;
+row arg4 (huge value in mode) stayed EINVAL ⇒ mode is **validated before** the derefs;
+row arg1 col2 had a VALID ids and still faulted ⇒ **states is dereferenced too**. That is
+PSAITO's `(ids, num, states, mode, timeout)` — now confirmed on 13.60 hardware, not just
+their 13.20. The tile's verdict carries this model and names what is still unmeasured
+(which of ids/states is checked first, mode/timeout positions, id encoding).
+
+**2. osem_create behaves like an allocator.** Successive creates with different name
+buffers returned `0xa6` then `0xa7` — a counter, not an errno table. With the 20:13
+`delete(0xa6) -> 0x0` differential, handles live at/above `0x80` and the first draft's
+`0x100` cutoff was masking them (fixed; regression-tested in test_convention 6c).
+
+**Added after that run: the "AIO live request" tile (T3b)** — the first tile that puts a
+LIVE pending AIO request in the kernel while staying arming-safe (`num=1` everywhere;
+harness tripwire). It follows PSAITO's verified recipe: `socketpair` (0x35) →
+`aio_submit_cmd(AIO_CMD_MULTI_READ=0x1001, reqs, 2, prio=3, ids)` with the read end at
+`reqs[i]+0x20` (0x28-byte structs) and reads left PENDING → `aio_multi_wait(ids, num=1)`
+→ wake-write to the other end → `aio_multi_cancel` + `aio_multi_delete` + closes. Its
+verdict separates what it MEASURED (whether submit's ids work as raw handles, whether a
+pending-request wait answers) from what it can never do (arm — that needs `num>=2` in ONE
+call and stays behind explicit operator approval).
+
+
+
+**A. DONE (20:13 + 22:12 runs).** The 5-arg shape is in and answered `0xa6`/`0xa7`;
+`delete(0xa6)=0` on hardware. The tile's `0x80` cutoff now lets a future run PROVE the
+handle via the delete-first epilogue instead of masking it.
+
+**B. DONE (22:12 run).** ABI `(ids=arg1, num=arg2)` is MEASURED on 13.60 — see §11.7.
+
+**B2. Run the new "AIO live request" tile (T3b, added after the 22:12 run).**
+Non-destructive and arming-safe by construction: `socketpair` → `aio_submit_cmd(MULTI_READ,
+N=2, prio=3)` with reads left PENDING → `aio_multi_wait(ids, num=1)` → wake-write →
+cancel/delete cleanup. `num=1` can never reproduce the UAF (that needs `num>=2` in ONE
+call — enforced by the harness tripwire, which fails the suite if any wire-call ever
+carries a valid array with `num>=2`). It measures what the armed call will see: whether
+submit's ids are raw handles, whether the pending-request wait answers (vs the EINVAL the
+all-zero and num=1-on-nothing calls gave), and it exercises cancel/delete. This is the
+last cheap read-only measurement before anything destructive.
+
+**C. Only after A, B, and B2, and only with explicit operator approval:** build the arming
 payload on PSAITO's structure (socketpair pending read → submit → node/witness setup →
 fire with `mode=0`), with the sentinel detection copied. Model it on
 `payloads/bagagwa_uaf_1320.js` **but re-derive** nothing from its offsets.
@@ -718,6 +763,10 @@ Read it as: **measuring and arming are within reach; a working jailbreak is not 
    reaches kernel memory, so it cannot test that; the operator's report that p2jb and
    poops are patched on 13.60 is the only source for it, and it is irrelevant to the probe
    anyway (the executor is pure WebKit userland; Bagagwa would replace p2jb's bug).
+8. **Do not raise `aio_multi_wait`'s `num` past 1 outside the approved arming payload.**
+   The T3b tile and the ABI sweep never do; the harness tripwire (test_convention 1b,
+   test_abimap all scenarios) fails the suite if any wire-call ever carries a valid array
+   with `num >= 2`.
 
 ---
 
@@ -728,9 +777,10 @@ cd pooP2JB
 node --check bagagwa_probe.js && node --check p2jb_lk.js
 node tools/test_calibrate.mjs     # 14 checks: anchor pick, data-word exclusion, BigInt,
                                   #   persistence, crash-restore
-node tools/test_convention.mjs    # 29 checks: raw / converted / plain-1 conventions,
+node tools/test_convention.mjs    # raw / converted / plain-1 conventions,
                                   #   patched-firmware MUST report DEAD,
-                                  #   osem handle proof, real-handle acceptance
+                                  #   osem handle proof + 0x80 cutoff regression,
+                                  #   live-request tile incl. num>=2 tripwire
 node tools/test_abimap.mjs        # 16 checks: deduction under 4 kernel shapes,
                                   #   attribution of which phase saw what,
                                   #   and the ARMING-SAFETY TRIPWIRE
