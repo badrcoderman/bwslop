@@ -65,6 +65,10 @@ function table(over) {
         "0x227": 0xen,          // osem_open     -> EFAULT
         "0x228": 0x3n,          // osem_close    -> ESRCH
         "0x226": 0x3n,          // osem_delete   -> ESRCH
+        "0x61": 0x16n,          // socket(AF_INET6) -> EINVAL (validator refuses by default)
+        "0x69": 0x16n,          // setsockopt(IPV6_RTHDR) -> EINVAL (13.x validator)
+        "0x6a": 0x16n,          // getsockopt(IPV6_RTHDR) -> EINVAL
+        "0xc2": 0x16n,          // getrlimit     -> EINVAL
     };
     return Object.assign(base, over);
 }
@@ -95,9 +99,14 @@ function run(name, over, opts) {
         alloc_string: () => 0x100000n,
         read_buffer: () => new Uint8Array(new Int32Array([7, 8]).buffer),
         read64: () => 0n,
-        syscall(nr, a0) {
+        syscall(nr, a0, a1, a2, a3, a4) {
             const key = k(nr);
-            calls.push(key + (a0 === undefined ? "" : "(" + a0.toString() + ")"));
+            /* record EVERY provided argument: scenario 9 asserts on multi-arg shapes
+             * (setsockopt(fd,41,51,...)); single-arg calls keep their exact old format. */
+            const args = [a0, a1, a2, a3, a4];
+            let last = -1;
+            for (let i = 0; i < args.length; i++) if (args[i] !== undefined) last = i;
+            calls.push(key + (last < 0 ? "" : "(" + args.slice(0, last + 1).map((x) => x.toString()).join(",") + ")"));
             /* close(fd): 0 for the fds the probe actually owns, EBADF/errno otherwise. */
             if (nr === 0x006) {
                 const fd = a0 === undefined ? -1n : BigInt(a0);
@@ -411,6 +420,35 @@ const check = (name, cond, extra) => {
     const { log, calls } = await run("arm-absent", { "0x297": 0x16n });
     check("8b: no UNSAFE tile without arm=1", !log.includes("UAF arm (UNSAFE)"));
     check("8b: no num>=2 multi_wait anywhere", !calls.some((c) => c.startsWith("0x297(") && c.split(",")[1] === "2"), calls.join(","));
+}
+
+/* 9. THE P2JB/poops TILE -- the patched 12.x kernel-bug surface, called for real. The
+ *    baseline kernel refuses every bug shape (EINVAL on the socket option); the tile must
+ *    still run all four probes, close EVERY descriptor, and print its verdict WITHOUT
+ *    ever writing kernel memory or calling an unproven number. */
+{
+    const { log, calls } = await run("t2c-refused", {});
+    check("9: T2c calls a real AF_INET6 socket", calls.some((c) => c.startsWith("0x61(")), calls.join(","));
+    check("9: T2c drives setsockopt(IPV6_RTHDR) with the 0x38 tag",
+        calls.some((c) => c.startsWith("0x69(") && c.includes(",41,51,")), calls.join(","));
+    check("9: T2c probes the IPV6_FL_AUDIT validator", calls.some((c) => c.startsWith("0x69(") && c.includes(",41,109,")), calls.join(","));
+    check("9: T2c drives getsockopt(IPV6_RTHDR)", calls.some((c) => c.startsWith("0x6a(")), calls.join(","));
+    check("9: T2c drives getrlimit(NOFILE)", calls.some((c) => c.startsWith("0xc2(")), calls.join(","));
+    check("9: T2c verdict reached on the refusing kernel", log.includes("T2c-VERDICT") && log.includes("closed again"), log.slice(-600));
+    check("9: T2c does NOT claim the cross-fd shape reproduced", !log.includes("CROSS-FD-RETURNED-0"));
+    /* every close in the log comes back 0 -- nothing stays open */
+    check("9: T2c cleanup closed everything it opened", !log.includes("close(ipv6)  ret=0x16") && log.includes("close(kq)"), log.slice(-600));
+}
+
+/* 9b. the headline path: if a kernel ever ACCEPTS the tag pair AND echoes it AND lets the
+ *     cross-descriptor read return 0, the verdict must say the 12.x primitives are ALIVE. */
+{
+    /* 0x35 must also succeed: the cross-descriptor probe (the headline trigger) needs a
+     * victim pair to exist; without one the tile skips it and no ALIVE verdict can fire. */
+    const { log } = await run("t2c-alive", { "0x61": 0x5n, "0x69": 0x0n, "0x6a": 0x0n, "0x35": 0x0n });
+    check("9b: accepted pair + echo => the verdict says the 12.x primitives are alive",
+        log.includes("THE 12.x CHAIN PRIMITIVES ARE ALIVE"), log.slice(-600));
+    check("9b: notify carried the T2c result", log.includes("NOTIFY  T2c:"), log.slice(-600));
 }
 
 console.log(fails ? `\n${fails} check(s) FAILED` : "\nall convention scenarios pass");

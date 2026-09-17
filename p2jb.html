@@ -2095,7 +2095,7 @@ async function main() {
                 // deliberately does NOT load is p2jb.js - or poops's own engine, which the
                 // early return below already skips. Nothing here can write kernel memory.
                 if (Q.get("sc") === "1") {
-                    await loadScript("bagagwa_probe.js?v=139");
+                    await loadScript("bagagwa_probe.js?v=140");
                     /* Forward the operator's switches to the probe. ?arm=1 renders and runs
                      * the UNSAFE UAF tile (a failed armed run is a power cycle); ?scauto=1
                      * makes RUN ALL start itself after userland. Not forwarded = off, and

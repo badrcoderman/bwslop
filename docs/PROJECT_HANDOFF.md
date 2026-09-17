@@ -22,14 +22,14 @@ The state of play in five lines:
    working 13.60 executor for this engine.
 2. **The Bagagwa syscalls exist on 13.60.** `aio_multi_wait` (syscall 663) answers
    `EINVAL`, **not** `ENOSYS`. The bug is therefore *reachable in principle*.
-3. The **argument order is now answered by a third party**, not by us — PSAITO's
-   `bagagwa_uaf_1320.js` states `aio_multi_wait(ids, num, states, mode, timeout)`, ids
-   first, five args, confirmed on 13.20 (§11).
-4. The **arming step has never been run on 13.60**, and per PSAITO's own file header the
-   kernel-side *effect* has never been confirmed on **any** firmware. Everything past
-   arming is speculative.
-5. **The immediate next two actions** are in §12. Neither is destructive. Do them before
-   anything else.
+3. **The ABI is measured on 13.60 hardware** (§11.7): `(ids, num, states, mode, timeout)`.
+4. **The arming step HAS now run once on 13.60** (11:21 run, §12.4): `aio_submit_cmd`
+   produced two LIVE pending requests (the request layout and encoding work!), but the
+   armed `multi_wait(num=2)` hit EFAULT because states was NULL — it never reached the
+   linking code. The states fix is committed; **the next ARM run is the first one that
+   genuinely tests the bug.**
+5. **Read §12.4 first** — it records what the ARM run taught and the P2JB/poops tile
+   (T2c). The DO-NOT-DO list (§13) grew two entries.
 
 **Nothing in this repo writes kernel memory on 13.60.** Keep it that way until §12 is
 done and the operator has explicitly approved the arming step (§13, "do-not-do").
@@ -752,6 +752,70 @@ Read it as: **measuring and arming are within reach; a working jailbreak is not 
 
 ---
 
+## 12.4 The P2JB/poops tile (T2c) and the 11:21 ARM analysis — 2026-09-17
+
+### What the 11:21 ARM run taught (all VERIFIED, one console run)
+
+1. **`aio_submit_cmd` WORKS end-to-end on 13.60**: `MULTI_READ n=2 prio=3` returned 0 and
+   produced two live pending requests with raw ids (`0x120a600002a6`, then 0). Half of
+   stage 0 is measured and functional, including the `0x28`/fd@+0x20 request layout.
+2. **The armed `multi_wait(ids, num=2, states=NULL, mode=0, timeout=0)` returned EFAULT
+   and NEVER REACHED THE LINKING CODE.** This is the MEASURED ABI model consuming itself:
+   the ABI-map matrix proved states (arg3) is dereferenced whenever num≥1 (row arg1 col2:
+   valid ids, states NULL → EFAULT). The arm tile passed 0 for states, so the kernel
+   faulted on the walk before linking anything. THE FIX (committed): pass a real zeroed
+   `states` buffer (0x40, room for one 0x38 io_state) — a wait on an incomplete request
+   returns before writing state, so zeroed states are safe. **Re-run the ARM tile with
+   this fix before concluding anything about mode/timeout positions or id encoding.**
+3. `socketpair` refuses (0xe EFAULT) even while `pipe2` works — the fallback path matters;
+   keep it.
+4. osem allocator counter continued across the run (0xa6→0xaa WAKE, 0xab→0xae SPRAY) —
+   another independent confirmation that these are kernel handles, not errnos.
+
+### The T2c tile (P2JB/poops calls) — what it is and is not
+
+`soniciso1/P2JB` is the 12.00-12.70 WebKit jailbreak; its kernel stage (p2jb.js) and the
+poops variant (p2jb_poops.js) drive one primitive family: `socket(AF_INET6=28)` pairs,
+`setsockopt(IPPROTO_IPV6=41, IPV6_RTHDR=51, tag, 0x38)` as the kernel poison-write, and
+`getsockopt(IPV6_RTHDR)` as the read back (master/victim cross-descriptor = arbitrary
+kernel R/W). T2c calls exactly that surface on 13.60, read-only:
+
+- `0x061 socket(AF_INET6,SOCK_STREAM)`, `0x035 socketpair` ×2, `0x16A kqueue`
+- `0x069 setsockopt(IPV6_RTHDR, tag 0x38)` — PASS = the 13.x validator ACCEPTED the pair;
+  `IPV6_FL_AUDIT=0x6d` driven as the differential validator probe
+- `0x06A getsockopt(IPV6_RTHDR)` read-back (tag echo?) and the **cross-descriptor bug
+  shape**: `getsockopt(victim-pipe-fd, IPV6_RTHDR)` — on 12.x this crossed; **if it ever
+  returns 0 on 13.60 that is the headline** (CROSS-FD-RETURNED-0)
+- `0x0C2 getrlimit(RLIMIT_NOFILE)` — the helper both chains use
+
+Everything closes again; nothing writes kernel memory. The verdict ladder: tag accepted +
+echo (or cross-fd 0) ⇒ "12.x CHAIN PRIMITIVES ALIVE"; accepted-but-no-shape ⇒ "validator
+passes benign pairs and still gates the bug"; all refused ⇒ "PATCHED as expected".
+**PS5 notify carries the result.** (Design note: IPV6_FL_AUDIT=0x6d comes from
+Wamphyre/PSAITO commit e0f3857's evidence-audit work on 13.x option validation.)
+
+### Inherited from Wamphyre/PSAITO commits (f8554d4 + e0f3857), worth keeping
+
+- **Gated chain pattern** (canary → AIO gate → shot, stop at first closed gate, CHAIN
+  RESULT summary) — mirrors our checkbox + RUN ALL gating; already implemented here.
+- **`?notify=0`** — their kill-switch because a wrong `nt` offset can kill the process on
+  notify. Our panel does not have this; if the PS5 notify ever wedges the browser, add it.
+- **osem ABI ground truth (osem2_1320.js)**: `CLOSE(0x228, live id) = EPERM` — our 0xa6
+  close=0x1 reading was correct; `attr=0x10 or large → EINVAL`; real ids look like
+  `0x61ab` (13.20); OPEN searches BY NAME after delete (ESRCH means the name is dead, not
+  the call).
+- **Their simulator discipline** (kernel model + tripwires) matches our harness approach;
+  their `sim: hang-expected` payload marker is a good pattern if we ever add payloads.
+
+### pLive fixes shipped with T2c (both caught by the harness)
+
+1. The wait now passes a real zeroed states buffer (arg3) — same EFAULT lesson as ARM.
+2. The cleanup fd labels were INVERTED (`close w` closed the read fd). Verified against
+   T2's pipe2 semantics: `rd[0]` is the read end. Harmless so far (both got closed), but a
+   silent trap if a future tile ever closed only one end.
+
+---
+
 ## 13. DO-NOT-DO list
 
 1. **The UAF is wired ONLY behind `?arm=1`** (the index.html UNSAFE checkbox). Do not
@@ -774,6 +838,12 @@ Read it as: **measuring and arming are within reach; a working jailbreak is not 
    The T3b tile and the ABI sweep never do; the harness tripwire (test_convention 1b,
    test_abimap all scenarios) fails the suite if any wire-call ever carries a valid array
    with `num >= 2`.
+9. **Do not run the ARM tile twice without a reboot between runs** — the tile itself says
+   so, and the 11:21 run's reclaim osems (0xa6..0xae) were left ALIVE on purpose; a second
+   run must not assume the zone is clean.
+10. **Do not "fix" T2c to try the master/victim write shape** (setsockopt on one fd then
+   getsockopt from another to move the rthdr pointer). That is the kernel-memory stage of
+   the 12.x bugs; the tile deliberately measures only the reachability of the surface.
 
 ---
 
