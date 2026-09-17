@@ -791,7 +791,41 @@ kernel R/W). T2c calls exactly that surface on 13.60, read-only:
 Everything closes again; nothing writes kernel memory. The verdict ladder: tag accepted +
 echo (or cross-fd 0) ⇒ "12.x CHAIN PRIMITIVES ALIVE"; accepted-but-no-shape ⇒ "validator
 passes benign pairs and still gates the bug"; all refused ⇒ "PATCHED as expected".
-**PS5 notify carries the result.** (Design note: IPV6_FL_AUDIT=0x6d comes from
+**PS5 notify carries the result -- AND IT IS REAL NOW (was a no-op until v=142).**
+
+* The v=141-and-earlier `notify()` called `window.send_notification`, which only
+  `p2jb_poops.js` ever defines -- a module the syscall-test page never loads. Every
+  "NOTIFY" row in every earlier log was a SILENT NO-OP. The operator was right.
+* The real implementation (bagagwa_probe.js, `notifySend`) ports
+  Theo3535/slopkit's `notify.html` recipe, which the operator confirmed works on
+  hardware: a ZEROED 0xC30-byte request with the ASCII message at **+0x2D**
+  (their `NOTIFICATION_REQUEST_SIZE` / `NOTIFICATION_MESSAGE_OFFSET`), delivered via
+  **syscall 0x2CA = SYS_NOTIFY_APP_EVENT** (documented in our own syscalls.js; the
+  libkernel RVA in their 13.60 profile, nt=0x48b0, matches our offsets/13.60.js).
+  Success = ret 0. The 1-arg shape is tried first; EINVAL promotes the session to
+  the 3-arg `(req,0,1)` shape (measured, not guessed).
+* `?notify=0` is the kill switch (Wamphyre/PSAITO's design): suppresses every toast
+  if notifications ever wedge the browser.
+* PROVEN buttons (notify / pid / fd / osem / AIO) in the panel footer each fire one
+  proven capability, print the evidence, and toast the measured result.
+
+**Socketpair correction (v=142): 0x035 was never socketpair.** Our offset maps say
+`0x087 = sys_socketpair`; 0x035 is sigtimedwait. The EFAULT on "socketpair" in the
+08:48, 11:21 and 15:37 runs was OUR wrong number. All tiles now call 0x087.
+
+**15:37 ARM postmortem (all three fixed):** (1) socketpair number, above;
+(2) pArm's pipe2 fallback sat one brace below its early-return, so rfd/wfd stayed 0
+-- the log showed no ARM-src line, `write(0)` -> 0x9 EBADF, `close(0)` -> 0x1;
+(3) the armed call passed states=NULL, but the measured ABI dereferences states at
+num>=1, so `multi_wait(num=2)` EFAULTed before the walk ever ran. The 15:37 verdict
+"NO OBSERVABLE EFFECT" is therefore VOID: the shot never reached the bug. The next
+armed run is the FIRST valid one.
+
+**Id encoding confirmed from hardware:** the 15:37 `ids=[0x120a7000020a7, 0x0]`
+decodes as two 32-bit ids (0x20a7, 0x120a7, stride 0x10000) -- PSAITO's encoding;
+our read64 layout was already right.
+
+(Design note: IPV6_FL_AUDIT=0x6d comes from
 Wamphyre/PSAITO commit e0f3857's evidence-audit work on 13.x option validation.)
 
 ### Inherited from Wamphyre/PSAITO commits (f8554d4 + e0f3857), worth keeping

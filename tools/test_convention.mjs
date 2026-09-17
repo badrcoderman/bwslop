@@ -59,7 +59,12 @@ function table(over) {
         "0x29d": 0x16n,         // aio_submit_cmd-> EINVAL
         "0x29a": 0x16n,         // aio_multi_cancel -> EINVAL
         "0x296": 0x16n,         // aio_multi_delete -> EINVAL
-        "0x35": 0x16n,          // socketpair    -> EINVAL (no pair by default)
+        "0x87": 0x0n,           // socketpair    -> 0 (real PS5 number; succeeds by default)
+        /* 0x35 is sigtimedwait, NOT socketpair -- our old tiles mislabeled it and its
+         * EFAULT polluted three hardware runs. The model keeps it only as a tripwire:
+         * if any tile ever calls 0x35 expecting a pair again, the assertions fail. */
+        "0x35": 0xen,           // sigtimedwait  -> EFAULT (never called anymore)
+        "0x2ca": 0x0n,          // SYS_NOTIFY_APP_EVENT -> 0 (toast queued; slopkit recipe)
         "0x4": 0x16n,           // write         -> EINVAL (refuses by default)
         "0x225": 0x16n,         // osem_create   -> EINVAL
         "0x227": 0xen,          // osem_open     -> EFAULT
@@ -446,7 +451,7 @@ const check = (name, cond, extra) => {
 {
     /* 0x35 must also succeed: the cross-descriptor probe (the headline trigger) needs a
      * victim pair to exist; without one the tile skips it and no ALIVE verdict can fire. */
-    const { log } = await run("t2c-alive", { "0x61": 0x5n, "0x69": 0x0n, "0x6a": 0x0n, "0x35": 0x0n });
+    const { log } = await run("t2c-alive", { "0x61": 0x5n, "0x69": 0x0n, "0x6a": 0x0n, "0x87": 0x0n });
     check("9b: accepted pair + echo => the verdict says the 12.x primitives are alive",
         log.includes("THE 12.x CHAIN PRIMITIVES ARE ALIVE"), log.slice(-600));
     check("9b: notify carried the T2c result", log.includes("NOTIFY  T2c:"), log.slice(-600));

