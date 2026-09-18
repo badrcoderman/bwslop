@@ -966,18 +966,47 @@ itself** — it can do anything the panel can. It is a research convenience, not
 boundary. On load it diffs `window` against a baseline taken at panel start and logs the
 new globals, so a silent failure is not possible.
 
-### 12.5.4 Lua payloads (`payloads/lua/`) and reference servers
+### 12.5.4 Lua payloads (`payloads/lua/`) — verified NOT runnable here, and not ported
 
-Mirrored from **n0llptr/remote_lua_loader**: `ftp_server.lua` (FTP on **port 1337**,
+Mirrored from **n0llptr/remote_lua_loader**: `ftp_server.lua` (FTP on **127.0.0.1:1337**,
 filesystem as the *game process* sees it; use WinSCP, FileZilla has known issues),
-`streaming_output.lua` (deliberately SIGSEGVs twice to prove output streams across a
-crashing payload) and `threading_test.lua` (Lua threads). See `payloads/lua/README.md`.
+`streaming_output.lua` and `threading_test.lua`. See `payloads/lua/README.md`.
 
-**They do not run in the browser.** They are consumed by a Lua-capable game process, and no
-tile in `bagagwa_probe.js` can execute them. They are here to be *served*, and to be read as
-reference for how a game-side loader is shaped. Companion payload server worth having on
-the same host: **ps5-payload-dev/websrv** (HTTP + WebDAV, port 8080) — also the right place
-to serve the `.elf` files in `payloads/`.
+**They cannot run here, and this is now checked against the upstream project's own
+README rather than assumed.** That loader works by exploiting games built on the **Artemis
+engine**, and is *"specific for the following list of games: Raspberry Cube (CUSA16074),
+Aibeya (CUSA17068), Hamidashi Creative …"* and *"If you have the savedata setup …"*.
+So a payload requires (1) one of **18 named games installed**, (2) **crafted savedata**
+injected into it, and (3) that game launched so its Lua VM loads the payload. They then run
+**inside the game process**, and their whole capability is the loader's injected globals.
+
+The payloads state the dependency themselves — `streaming_output.lua` opens with
+`if not memory then errorf("stage #1 not loaded")`, and `ftp_server.lua` calls
+`memory.alloc(16)` at top level. Every file here uses `memory.*`, `syscall.resolve`,
+`run_lua_code_in_new_thread`, `printf`, `hex` and `eboot_base`/`libc_base`/
+`libkernel_base` — **all loader-provided**. Our page is WebKit with **no Lua engine**, so a
+tile in `bagagwa_probe.js` can never execute one of these. That is a fact about the
+environment, not a missing feature.
+
+**Why they were not ported to JS** (full table in `payloads/lua/README.md`):
+
+* `ftp_server.lua` → the equivalent already ships here as **`payloads/ftpsrv-ps5.elf`** and
+  **`payloads/websrv-ps5.elf`**, delivered via `payloads/elfldr-ps5-1360.elf`. A JS rewrite
+  would be a worse copy, and is structurally wrong for this executor: an FTP server is a
+  **blocking `accept()` loop**, while our ROP executor is a synchronous call that
+  **busy-spins the main thread** — blocking accept wedges the browser, so it would need
+  non-blocking sockets + `kqueue` + a worker. Large, and pointless beside the ELF.
+* `threading_test.lua` → **Web Workers**, already used by `rop-worker.js` / `rop_slave.js`.
+  Nothing to port.
+* `streaming_output.lua` → the **bases** and the **real-time streaming log** are already
+  ours (`OFF-base`, `T5-state`, DOM + `localStorage` + `flushMark`/`syncMark`). The
+  **deliberate-crash half** is the only genuinely portable idea: `write64(<unmapped>, 0)`
+  tests the crash-persistence claim we make for `bwslop_sc_log` and have never tested. It
+  **kills the tab** and needs a reload, so it is deliberately NOT implemented — it belongs
+  behind an explicit button with a warning, if it is wanted at all.
+
+Companion payload server worth having on the same host: **ps5-payload-dev/websrv**
+(HTTP + WebDAV, port 8080) — also the right place to serve the `.elf` files in `payloads/`.
 
 ### 12.5.5 Theme ("boo & fantasy"), fullscreen and detailed results
 
@@ -1051,8 +1080,13 @@ Two bugs this scenario caught during development, both worth remembering:
    the OOM the chunking exists to avoid (§12.5.2).
 13. **Do not load a remote script you do not trust.** The loader runs it at the panel's own
    privilege; there is no sandbox. It is a research convenience (§12.5.3).
-14. **Do not treat the Lua payloads as browser payloads.** Nothing in this repo executes
-   them; they need a Lua-capable game process (§12.5.4).
+14. **Do not describe the Lua payloads as "a Lua-capable game process", full stop.** Be
+   exact: they need one of **18 named Artemis-engine games** plus **crafted savedata**, and
+   they run inside that game. Nothing in this repo executes them, and they were
+   deliberately **not** ported: the file-transfer and threading jobs are already covered by
+   `ftpsrv-ps5.elf` / `websrv-ps5.elf` and by Web Workers — §12.5.4.
+15. **Do not "just port ftp_server.lua to JS".** It is a blocking `accept()` loop and our
+   executor busy-spins the main thread; the maintained ELF is the correct route §12.5.4.
 
 ---
 
