@@ -349,7 +349,13 @@ range is `+0xF0` wrecks two unrelated qwords.
 
 ---
 
-## 9. `bagagwa_probe.js` — the Syscall test panel (1248 lines, the file we own)
+## 9. `bagagwa_probe.js` — the Syscall test panel (2788 lines, the file we own)
+
+> The panel grew past its read-only tile set on 2026-09-18: **read-only** evidence tools
+> (offset verification, libkernel peek, the streaming dumper) and a **remote JS loader**
+> were added, plus the "boo & fantasy" theme, the fullscreen undo and the detailed results
+> table. All of that is documented in **§12.5**. The tile list in §9 below is the original
+> read-only suite and is still accurate for those tiles.
 
 Loaded instead of `p2jb.js` when the URL has `&sc=1`. It loads **everything a real run
 loads except the two kernel modules**, so it exercises the *same* executor. It auto-runs
@@ -889,6 +895,124 @@ on. `S()` now honors `quiet` on the throw path too, and the kernel models know `
 
 ---
 
+## 12.5 The evidence tools, the dumper and the theme — 2026-09-18
+
+Everything in this section is **read-only**, sits on the primitive the boot chain already
+proved (`window.read_buffer` — the WebKit OOB read of *this process's* memory), and is
+covered by a harness scenario that decodes the dumper's output byte-for-byte.
+
+### 12.5.1 Why "read the offsets" is a real check and not decoration
+
+`main.js` derives the libkernel base out of a **WebKit GOT slot**:
+
+```
+libKernelBase = read64(webkitBase + OFFSET_wk___stack_chk_guard_import)
+                - OFFSET_lk___stack_chk_guard
+```
+
+Get that off by one page and every syscall *still answers* (they go through the hijacked
+worker, whose address came from the same base) while **every RVA used for ROP lands on the
+wrong bytes**. The failure presents as "the kernel rejected us" rather than "our base is
+wrong". Reading the first 16 bytes at each RVA is the one cheap way to see the difference,
+and it is what `tools/lkfind.js` does offline — now done against the live console.
+
+* **`Verify offsets (memory read)` tile** — resolves every RVA in the live
+  `window.P2JB_LK[fw]` row plus the notify entry (`+0x48B0`), reads 16 bytes at each, and
+  prints the qword + ASCII. Verdict counts live / zeroed / unreadable. **A zeroed anchor is
+the signature of a right-RVA-wrong-base mismatch**; an *unreadable* one is off the end of
+the mapped image.
+* **`Peek libkernel` tile** — a SMALL fixed window (32 bytes) at the three addresses that
+  matter most: the notify entry, the parked resume slot (`+0x1988B`) and the syscall stub
+  (`+0x1AEB7`). Printed as a real hexdump.
+
+### 12.5.2 The libkernel dumper — why the earlier one "stopped because of OOM"
+
+The dumper streams a bounded slice of libkernel (or WebKit) to a **POST target the
+operator supplies** — a webhook, a LAN collector, anything that records a request body.
+Wire format is plain text so any receiver can log it:
+
+```
+BAGA-BEGIN <session> fw=<fw> base=<addr> total=<n> chunk=<n>
+BAGA <offset-hex> <len> <base64>
+BAGA-END <session> chunks=<n> bytes=<n> failed=<n>
+```
+
+Five design points, each one targeting a specific way a large dump dies:
+
+1. **One chunk in the heap at a time.** Read → encode → POST → drop, before the next read.
+   A 1 MB dump costs the same heap as a 2 KB one. Nothing is accumulated.
+2. **Manual base64** in 3-byte groups. `btoa()` rejects a `Uint8Array`, and
+   `String.fromCharCode.apply(null, bigArray)` blows the stack.
+3. **`setTimeout(0)` between chunks**, so GC runs and the panel repaints. A tight
+   synchronous loop of hundreds of chunk reads starves GC and looks exactly like an OOM kill.
+4. **One log line per 16 chunks**, never per chunk — the DOM nodes and the persisted-log
+   tail are the *other* two ways a dump takes the tab down.
+5. **One retry, then count and skip.** Never an unbounded retry queue.
+
+Controls live in a collapsed **tools** drawer (bytes / chunk / base / target / stop) so the
+panel still reads simply by default.
+
+> **Finding, from the harness:** once the new per-tile DETAIL rows and the offsets/peek byte
+> lines were added, a full RUN ALL **overran the persisted-log tail** (16k/8k) and the
+> EARLY rows — exactly the part a post-mortem needs — were evicted before the run ended. The
+> budget is now **64k/32k**. The harness reads the store repeatedly and joins the fragments,
+> which is how the crash-recovery log is meant to be read anyway.
+
+### 12.5.3 Remote JS loader (Y2JB `remotejsloader` pattern)
+
+The page holds no payload; the operator gives a URL and the panel injects
+`<script src=...>`. **Scope, stated plainly: that is the same trust level as the page
+itself** — it can do anything the panel can. It is a research convenience, not a security
+boundary. On load it diffs `window` against a baseline taken at panel start and logs the
+new globals, so a silent failure is not possible.
+
+### 12.5.4 Lua payloads (`payloads/lua/`) and reference servers
+
+Mirrored from **n0llptr/remote_lua_loader**: `ftp_server.lua` (FTP on **port 1337**,
+filesystem as the *game process* sees it; use WinSCP, FileZilla has known issues),
+`streaming_output.lua` (deliberately SIGSEGVs twice to prove output streams across a
+crashing payload) and `threading_test.lua` (Lua threads). See `payloads/lua/README.md`.
+
+**They do not run in the browser.** They are consumed by a Lua-capable game process, and no
+tile in `bagagwa_probe.js` can execute them. They are here to be *served*, and to be read as
+reference for how a game-side loader is shaped. Companion payload server worth having on
+the same host: **ps5-payload-dev/websrv** (HTTP + WebDAV, port 8080) — also the right place
+to serve the `.elf` files in `payloads/`.
+
+### 12.5.5 Theme ("boo & fantasy"), fullscreen and detailed results
+
+* The theme is a **second `<style>` sheet appended after the base sheet**. Equal
+  specificity means last-wins, so it needs no `!important` and the base sheet stays the
+  single source of geometry — a theme edit cannot break a layout or a test. Pure CSS: no
+  images, no extra listeners, no DOM nodes, so it cannot add measurable memory.
+* **Fullscreen had a real bug:** the log was `z-index:2147483647`, so it covered its own
+  exit button — fullscreen was a one-way trip. The log is now `z-index:7` inside a body-level
+  floating **exit** button, and **Esc** also exits. Fullscreen font was **shrunk** (19px →
+  12px) because fullscreen is for reading a lot of log.
+* **Detailed results:** every tile logs a `-DETAIL` line with **elapsed ms** and a one-line
+  outcome, and RUN ALL prints a `[ ok ]/[FAIL] <ms> <label> — <summary>` table at the end
+  instead of just a count.
+
+### 12.5.6 Harness coverage for all of the above (`test_convention.mjs` scenario 11)
+
+Scenario 11 builds a **real memory model** (a fake libkernel image whose bytes at each
+anchor RVA are known), drives the dumper through a **recording `fetch()`**, then **decodes
+every BAGA frame and compares it byte-for-byte against the image**. Checks include: the
+base and each qword are the bytes really there; every anchor RVA in the live `P2JB_LK` row
+was read; the dump frames are well formed; the chunk count × size equals the requested
+length; and the base64 **round-trips exactly**.
+
+Two bugs this scenario caught during development, both worth remembering:
+
+* **`fetch` resolution.** The probe called bare `fetch()`; in the vm it existed only as
+  `window.fetch`, so the dumper silently fell through and reported **"0 chunks sent" with no
+  error anywhere**. `postText` now resolves `fetch` from both the global and `window`, and
+  says so explicitly when neither exists.
+* **Anchor filter.** `lkAnchors()` accepted only `typeof === "number"`. `p2jb_lk.js` carries
+  Numbers, but a BigInt-typed profile would have dropped **every** anchor — a filter that
+  fails by returning *less*, which reads as "this firmware has no anchors". It now accepts
+  both.
+
 ## 13. DO-NOT-DO list
 
 1. **The UAF is wired ONLY behind `?arm=1`** (the index.html UNSAFE checkbox). Do not
@@ -917,6 +1041,18 @@ on. `S()` now honors `quiet` on the throw path too, and the kernel models know `
 10. **Do not "fix" T2c to try the master/victim write shape** (setsockopt on one fd then
    getsockopt from another to move the rthdr pointer). That is the kernel-memory stage of
    the 12.x bugs; the tile deliberately measures only the reachability of the surface.
+11. **Do not point the dumper at an address outside the mapped image and call it a base
+   failure.** An *unreadable* anchor (`read threw`) means the RVA is off the end of the
+   mapping; a *zeroed* anchor is the one that indicts the base. The verdict counts them
+   separately on purpose (§12.5.1).
+12. **Do not batch the dump into one giant POST.** The whole point of the framing
+   (`BAGA-BEGIN` / `BAGA <off> <len> <b64>` / `BAGA-END`) is that one chunk lives in memory
+   at a time. Building the full base64 string first and posting it once reintroduces exactly
+   the OOM the chunking exists to avoid (§12.5.2).
+13. **Do not load a remote script you do not trust.** The loader runs it at the panel's own
+   privilege; there is no sandbox. It is a research convenience (§12.5.3).
+14. **Do not treat the Lua payloads as browser payloads.** Nothing in this repo executes
+   them; they need a Lua-capable game process (§12.5.4).
 
 ---
 
@@ -931,13 +1067,24 @@ node tools/test_convention.mjs     # raw / converted / plain-1 conventions,
                                    #   patched-firmware MUST report DEAD,
                                    #   osem handle proof + 0x80 cutoff regression,
                                    #   live-request tile incl. num>=2 tripwire,
-                                   #   notify route ladder (10/10b)
+                                   #   notify route ladder (10/10b),
+                                   #   evidence tools: offsets / peek / dumper
+                                   #   ROUND-TRIP against a modelled image (11)
 node tools/test_abimap.mjs         # 16 checks: deduction under 4 kernel shapes,
                                    #   attribution of which phase saw what,
                                    #   and the ARMING-SAFETY TRIPWIRE
 node tools/test_offsets_parity.mjs # 13.60 userland table: offsets/13.60.js vs
                                    #   bagagwa.js USERLAND_1360 vs noslop's table
 ```
+
+**Scenario 11 (v=145) — the evidence tools, end to end.** It builds a real memory model
+(a fake libkernel image with known bytes at every anchor RVA), drives the dumper through a
+recording `fetch()`, then **decodes every `BAGA` frame and compares it byte-for-byte to the
+image**. A dump that merely *looks* right is worthless, so the round-trip is the assertion
+that matters. It also reads the persisted log **repeatedly and joins the fragments**,
+because that store is a bounded tail — a single read at the end would silently lose what
+the earlier tiles wrote, which is the same trap the panel's own crash-recovery log set
+(see §12.5.2, where that trap turned out to be a real overrun in the 16k budget).
 
 **The parity harness (v=144).** The 13.60 userland table lives in three places --
 `offsets/13.60.js`, `bagagwa.js`'s `USERLAND_1360`, and
@@ -994,6 +1141,13 @@ is no 13.60 one locally, which is precisely why the runtime calibrate tile exist
   ("Origin unknown. Publicly circulating writeup. Not our work." — X1NON-PSJB's own words).
 * `X1NONs/PSAITO`, `X1NONs/X1NON-PSJB`, `X1NONs/Bagagwa_chain`, `OzRviju/bagagwa-exploit`
   — third-party, cited above with the specific claim each one supports.
+* `payloads/lua/*.lua` — **mirrored verbatim** from `n0llptr/remote_lua_loader`
+  (`payloads/` and `payloads/test_cases/`). Upstream authorship and licence; this is a
+  local mirror for offline console work, not a fork. See `payloads/lua/README.md`.
+* `Theo3535/slopkit` — the source of the notch recipe the notify ladder ported
+  (`notify.html`, 13.60 `nt=0x48b0`).
+* `ps5-payload-dev/websrv` — referenced only, as a payload server recommendation; no code
+  from it is vendored here.
 * **Written by us** (this effort), and safe to treat as ours:
   `bagagwa_probe.js`, `docs/PROJECT_HANDOFF.md`, `tools/test_{calibrate,convention,abimap}.mjs`,
   the `13.60` row and group-C notes in `p2jb_lk.js`, the 13.60 entries in `main.js` and

