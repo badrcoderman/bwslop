@@ -920,23 +920,42 @@ on. `S()` now honors `quiet` on the throw path too, and the kernel models know `
 
 ---
 
-## 14. Testing — three headless harnesses, run them before every push
+## 14. Testing — four headless harnesses, run them before every push
 
 ```
 cd pooP2JB
-node --check bagagwa_probe.js && node --check p2jb_lk.js
-node tools/test_calibrate.mjs     # 14 checks: anchor pick, data-word exclusion, BigInt,
-                                  #   persistence, crash-restore
-node tools/test_convention.mjs    # raw / converted / plain-1 conventions,
-                                  #   patched-firmware MUST report DEAD,
-                                  #   osem handle proof + 0x80 cutoff regression,
-                                  #   live-request tile incl. num>=2 tripwire
-node tools/test_abimap.mjs        # 16 checks: deduction under 4 kernel shapes,
-                                  #   attribution of which phase saw what,
-                                  #   and the ARMING-SAFETY TRIPWIRE
+node --check bagagwa_probe.js && node --check p2jb_lk.js && node --check offsets/13.60.js
+node tools/test_calibrate.mjs      # 14 checks: anchor pick, data-word exclusion, BigInt,
+                                   #   persistence, crash-restore
+node tools/test_convention.mjs     # raw / converted / plain-1 conventions,
+                                   #   patched-firmware MUST report DEAD,
+                                   #   osem handle proof + 0x80 cutoff regression,
+                                   #   live-request tile incl. num>=2 tripwire,
+                                   #   notify route ladder (10/10b)
+node tools/test_abimap.mjs         # 16 checks: deduction under 4 kernel shapes,
+                                   #   attribution of which phase saw what,
+                                   #   and the ARMING-SAFETY TRIPWIRE
+node tools/test_offsets_parity.mjs # 13.60 userland table: offsets/13.60.js vs
+                                   #   bagagwa.js USERLAND_1360 vs noslop's table
 ```
 
-All three run the real `bagagwa_probe.js` inside `vm` with a stubbed DOM/`window`, and read
+**The parity harness (v=144).** The 13.60 userland table lives in three places --
+`offsets/13.60.js`, `bagagwa.js`'s `USERLAND_1360`, and
+`../noslop/offsets/offsets.json["13.60"]` -- and nothing used to enforce that they
+agreed. A one-digit drift in any of them is nasty: `main.js` derives libkernelBase by
+subtracting an export RVA from a live GOT slot and requiring **three-way agreement**, so
+a stale value does not throw a clear error, it just fails the agreement check and looks
+like a KASLR or missing-console-value problem. The harness parses all three (text
+regex, no evaluation), compares all 9 fields pairwise, and exits non-zero on drift. The
+noslop table is also **pinned inside the harness**, so the check still runs on CI / Pages
+/ a fresh clone where `../noslop` is absent. It carries an `F0b` self-check on its own
+parser: the first version of this file used `name = value` regexes against bagagwa.js's
+`name: value` literals, reported every field MISSING, and looked like a real alarm.
+
+Falsification-tested: changing the trampoline to `0x1D6FF` produced three failures
+(F2 pinned, F3 in-repo, F4 noslop). Restoring `0x1D6FA` returns all-green.
+
+All three probe harnesses run the real `bagagwa_probe.js` inside `vm` with a stubbed DOM/`window`, and read
 the panel log out of the stubbed `localStorage` (`bwslop_sc_log`). When you change probe
 behaviour, add a case — the convention harness's most valuable test is that a **patched**
 firmware reports `BAGAGWA DEAD`; the ABI harness's is that the tripwire never fires.

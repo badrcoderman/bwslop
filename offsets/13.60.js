@@ -9,6 +9,8 @@
 //     X1NONs/Bagagwa_chain ships the same two maps at 13.40 with the note
 //     "carried over VERBATIM on the code-frozen hypothesis". Three
 //     independent 13.x profiles agree byte-for-byte on gadgets and stubs.
+//   * OFFSET_wk_natural_trampoline (0x1D6FA) is 13.60-only and comes from the
+//     noslop/POC userland table (its "gd"); see the note at the constant.
 //   * The six LK/LK-GOT values marked [X1NON] below are the ONLY numbers here
 //     that were not already in this tree. They come from
 //     X1NONs/PSAITO offsets/13.XX/13.60 (declared "X1NON-verified").
@@ -26,6 +28,16 @@
 // Identical at 13.00, 13.40 and 13.60.
 const OFFSET_wk_host_constructor_candidates = [0x00056A58, 0x00056CA0, 0x00057CE8];
 const OFFSET_wk_vtable_first_element     = 0; // needs a console
+// [noslop/POC + slopkit] The natural ROP trampoline. This is the value noslop's
+// offsets.json calls "gd" and slopkit's launcher calls P_GADGET -- a
+// ret-terminated WebKit TEXT gadget that starts the host-constructor call path
+// WITHOUT needing a live vtable (which is why it matters: the vtable above is
+// still 0 until a console hands us one). It was only ever carried inside
+// bagagwa.js's USERLAND_1360 table; it now lives here too, because a reader
+// building a stage looks for the trampoline in the offset file, not in a probe.
+// Value agrees with noslop/offsets/offsets.json["13.60"].gd and bagagwa.js.
+// 13.60-only: no 13.00/13.20 profile in this tree carries it.
+const OFFSET_wk_natural_trampoline             = 0x0001D6FA;
 const OFFSET_wk_memset_import                  = 0x03350850;
 const OFFSET_wk___stack_chk_guard_import       = 0x0334E198;
 
