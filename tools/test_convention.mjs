@@ -105,8 +105,17 @@ function run(name, over, opts) {
         alloc_string: () => 0x100000n,
         read_buffer: () => new Uint8Array(new Int32Array([7, 8]).buffer),
         read64: () => 0n,
+        read32: () => 0xA0C9n,
         syscall(nr, a0, a1, a2, a3, a4) {
             const key = k(nr);
+            /* opts.waitMs models a kernel that ACTUALLY BLOCKS in aio_multi_wait. Without a
+             * model that blocks, the probe's new timing diagnosis would only ever exercise
+             * one branch, and the other one -- the one that distinguishes "the kernel is
+             * patched" from "our ids were not recognised" -- would never be tested. */
+            if (key === "0x297" && opts.waitMs) {
+                const t0 = Date.now();
+                while (Date.now() - t0 < opts.waitMs) { /* spin, like the real executor */ }
+            }
             /* record EVERY provided argument: scenario 9 asserts on multi-arg shapes
              * (setsockopt(fd,41,51,...)); single-arg calls keep their exact old format. */
             const args = [a0, a1, a2, a3, a4];
@@ -216,6 +225,12 @@ const check = (name, cond, extra) => {
         !calls.includes("0x228(22)"), calls.join(","));
     /* The live-request tile must have run inside RUN ALL and NEVER produced a num>=2 wait. */
     check("1: live-request tile ran", log.includes("T3b-VERDICT"), log);
+    /* THE CRASH SELF-TEST MUST NEVER BE REACHABLE FROM RUN ALL. It closes the tab by
+     * design, so an accidental wiring as a tile would turn every suite run into a process
+     * death. Asserted on the observable, not the wiring: a normal RUN ALL must produce NO
+     * crash row at all. */
+    check("1: the crash self-test did NOT run during RUN ALL",
+        !log.includes("crash-persistence self-test") && !log.includes("sc CRASH"), log.slice(-500));
     check("1: live request says num=1 can never reproduce the UAF",
         log.includes("num=1 can never reproduce the UAF") || log.includes("needs num>=2 in ONE call"));
 }
@@ -266,6 +281,39 @@ const check = (name, cond, extra) => {
     check("1b: cleanup ran (cancel+delete)", log.includes("cancel=0x0") && log.includes("delete=0x0"), log);
     check("1b: verdict distinguishes measured vs never-armed",
         log.includes("LIVE-REQUEST REACHABILITY MEASURED") && log.includes("That step stays behind your explicit go"), log);
+    /* --- the id-encoding / timing diagnosis. These live HERE, not in scenario 1: in
+     *     scenario 1's model aio_submit_cmd answers EINVAL, so the live tile exits at
+     *     "submit refused" and never reaches any of these rows. Asserting them there would
+     *     have been a test that could only have passed by accident. -------- */
+    check("1b: T3b decodes ids as TWO 32-bit values, not one 64-bit handle",
+        /T3b-submit[\s\S]{0,320}decoded as two 32-bit ids at stride 4/.test(log), log.slice(-900));
+    check("1b: T3b prints a TIMING row for the wait", log.includes("T3b-timing"), log.slice(-900));
+    check("1b: T3b timing says it did NOT block while the reads were pending (0ms model)",
+        /T3b-timing[\s\S]{0,400}It did NOT block/.test(log), log.slice(-900));
+    check("1b: T3b names the failure as OUR encoding, not a patched kernel",
+        /T3b-timing[\s\S]{0,600}not a patched kernel/.test(log), log.slice(-900));
+    /* out() pads tag and detail with TWO spaces, so match on the row NAME, not a
+     * single-space phrase -- the first version of this assertion failed on whitespace
+     * alone while the rows were plainly present. */
+    check("1b: T3b runs the id-packing differential and prints a verdict",
+        log.includes("T3b-idtest") && log.includes("stride4-as-submitted")
+        && log.includes("stride8-widened") && log.includes("T3b-idverdict"),
+        log.split("\n").filter((l) => l.includes("T3b-id")).join(" // ").slice(-400));
+    /* THE FALSE-POSITIVE FALSIFICATION. This model answers EINVAL (0x16) to EVERY 0x297
+     * call, exactly like a kernel rejecting the argument set. The differential must NOT
+     * read that as "the kernel recognised this packing" -- the whole point of separating
+     * 0x0 / EINVAL / other. The first implementation DID claim a winner here. */
+    check("1b: an EINVAL-everywhere kernel is NOT reported as a recognised packing",
+        !/T3b-idverdict[\s\S]{0,200}actually reacted to/.test(log),
+        log.split("\n").filter((l) => l.includes("T3b-idverdict")).join(" // "));
+    check("1b: the differential explains why EINVAL is not recognition",
+        /T3b-idverdict[\s\S]{0,400}rejecting the ARGUMENT SET/.test(log),
+        log.split("\n").filter((l) => l.includes("T3b-idverdict")).join(" // "));
+
+    /* --- THE ARM TIMING ROW, exercised end to end. The ARM tile needs ?arm=1; with a
+     *     non-blocking model the row must say the UAF was NOT armed and must explicitly
+     *     refuse to let the operator read it as "this firmware is patched". -------- */
+
     /* THE tripwire, parsed from the recorded argument lists: for every 0x297 call that has
      * TWO nonzero arguments in array+num positions, num must be <= 1. Position matters --
      * in the ABI sweep the BUFFER itself lands in a1 (row arg2), so treating a1 as num
@@ -449,6 +497,20 @@ const check = (name, cond, extra) => {
     check("8: verdict says no-observable-effect on the model kernel (sentinels untouched)",
         log.includes("NO OBSERVABLE EFFECT"), log.slice(-500));
     check("8: notify carried the arm result", log.includes("NOTIFY  ARM:"), log.slice(-500));
+    /* --- THE ARM TIMING ROW. This scenario is the only one that arms, so it is the only
+     *     place these rows exist. On a 0ms model kernel the row must say the call did NOT
+     *     block, and the verdict must explicitly refuse to let that be read as "the firmware
+     *     is patched" -- the wrong verdict this panel is most likely to print. ---- */
+    check("8: ARM-timing row exists and says the armed call did NOT block (0ms model)",
+        /ARM-timing[\s\S]{0,520}did NOT block/.test(log), log.slice(-1000));
+    /* The verdict phrase is its OWN wording -- the "not as a patched kernel" line lives in
+     * the ARM-timing row, not in the verdict. Anchoring both to the same sentence is how an
+     * assertion silently stops testing anything. */
+    check("8: the ARM verdict blames the id encoding, not the firmware",
+        /ARM-VERDICT[\s\S]{0,1200}NOT evidence about whether/.test(log),
+        log.split("\n").filter((l) => l.includes("ARM-VERDICT")).join(" // ").slice(-400));
+    check("8: ARM-timing carries the millisecond measurement",
+        /ARM-timing[\s\S]{0,120}returned after \d+ms/.test(log), log.slice(-900));
 }
 
 /* 8b. WITHOUT ?arm=1 the armed tile must NOT render and NO num>=2 may ever fire. */
@@ -485,6 +547,22 @@ const check = (name, cond, extra) => {
     check("9b: accepted pair + echo => the verdict says the 12.x primitives are alive",
         log.includes("THE 12.x CHAIN PRIMITIVES ARE ALIVE"), log.slice(-600));
     check("9b: notify carried the T2c result", log.includes("NOTIFY  T2c:"), log.slice(-600));
+}
+
+/* 1c. THE FALSIFICATION of the new timing diagnosis. A kernel model that really BLOCKS in
+ *     aio_multi_wait must flip the verdict from "did NOT block" to "BLOCKED" -- and, when
+ *     the armed call blocks but no detector moves, the ARM verdict must stop blaming the ids
+ *     and say the link happened instead. A diagnostic that cannot be made to say the other
+ *     thing is not measuring anything. */
+{
+    /* 0x29d (aio_submit_cmd) must SUCCEED for the live tile to reach its timing row at all. */
+    const { log } = await run("aio-blocks", { "0x29d": 0x0n }, { waitMs: 45 });
+    check("1c: T3b timing flips to BLOCKED when the kernel actually waits",
+        /T3b-timing[\s\S]{0,400}It BLOCKED/.test(log), log.split("\n").filter((l) => l.includes("T3b-timing")).join(" // "));
+    check("1c: a blocking wait means the ids ARE recognised (verdict says so)",
+        /ID ENCODING:[\s\S]{0,200}does recognise our ids/.test(log), log.slice(-1400));
+    check("1c: T3b timing no longer claims the ids were unrecognised",
+        !/T3b-timing[\s\S]{0,400}It did NOT block/.test(log), log.split("\n").filter((l) => l.includes("T3b-timing")).join(" // "));
 }
 
 /* 11. LIBKERNEL EVIDENCE TOOLS -- offsets verification, the bounded peek, and the

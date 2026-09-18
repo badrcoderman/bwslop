@@ -1042,6 +1042,79 @@ Two bugs this scenario caught during development, both worth remembering:
   fails by returning *less*, which reads as "this firmware has no anchors". It now accepts
   both.
 
+## 12.6 The AIO timing diagnosis — the v144 log's decisive clue (2026-09-18)
+
+**This is the most important new fact about the kernel chain in this document.**
+
+The v144 console run's ARM verdict was `NO OBSERVABLE EFFECT`, which invites the conclusion
+"13.60 is patched". The log actually contains something much sharper:
+
+```
+T3b-submit  ok -- 2 pending MULTI_READ requests, ids=[0x1a0c90000a0c9, 0x0]
+T3b-wait    aio_multi_wait(ids, num=1) -> 0x0        (0ms)
+write(wfd,1)                 <-- the wake byte, written AFTER the wait
+```
+
+The wait returned **success in 0 ms while both reads were still pending**, and the wake byte
+had not even been written yet. **A multi_wait over pending requests cannot do that.** So the
+call did not wait -- and a call that never waited cannot have walked a node onto two
+requests' waiter lists. The UAF was **never armed** by that run.
+
+Two consequences:
+
+1. **`ids=[0x1a0c90000a0c9, 0x0]` is not one 64-bit handle.** It decodes as **two 32-bit ids
+   at stride 4** -- `0x0a0c9` and `0x1a0c9` -- which is exactly PSAITO's `4*NREQ` layout.
+   That is a measurement of the layout, read straight out of the buffer the submit wrote.
+2. The likely failure is **our id encoding / argument set**, not a patched kernel. Which is
+   a very different piece of work (and a much cheaper one) than "Bagagwa is dead".
+
+### What the tiles now do about it
+
+* **`T3b-timing` / `ARM-timing` rows.** Both AIO tiles measure the wait in milliseconds and
+  compare it against the fact that the wake byte comes *later*. The verdict now states
+  which of the two worlds it is in:
+  * did **not** block  -> the kernel never saw our ids as pending requests; explicitly
+    labelled *"OUR id encoding, not a patched kernel"*;
+  * did block -> the ids ARE recognised, and only then do the sentinels mean anything.
+* **The id-packing differential (`T3b-idtest` / `T3b-idverdict`).** Still **num=1 on every
+  call**, so the tile's safety property is untouched: it remains structurally incapable of
+  linking a node onto two requests' waiter lists. It tries the submitted layout and an
+  id-widened-to-64-bit-slot layout, at timeout 0 and 1. `0n` is *empirically* non-blocking
+  on this kernel (v144 returned immediately with it), so the probe cannot hang; `1n` is at
+  worst an inert validated scalar per the measured ABI. A packing counts as **recognised**
+  only if the kernel **blocks** or answers something that is neither `0` nor EINVAL.
+
+### The false positive the harness caught in that differential
+
+The first implementation counted any non-zero answer as "the kernel reacted" and announced
+a confident packing recommendation. On a model kernel that answers **EINVAL to every
+0x297 call** -- i.e. one that rejects the argument set without ever looking at the ids -- it
+still claimed a winner. **EINVAL is not a recognition signal**: the ABI tile measured the
+all-zero call as EINVAL too. The classifier now separates `0` / EINVAL / other, and the
+verdict says outright that an all-EINVAL kernel means *"this differential has NOT tested the
+stride at all"*. Scenario 1b asserts exactly that, and scenario 1c asserts the opposite
+branch with a model that **does** block (`opts.waitMs`) -- a diagnostic that cannot be made
+to say the other thing is not measuring anything.
+
+## 12.7 The crash-persistence self-test, and the ELF route for FTP
+
+**Crash-persistence self-test** (`tools` drawer, NOT a tile, NOT in RUN ALL). This is the
+only genuinely portable idea from `streaming_output.lua`. It writes a marker to
+`localStorage`, then writes 8 bytes to an **unmapped address**, killing the WebProcess
+*exactly* as the Lua payload's two bogus writes do. The proof is after the fact: on the next
+load the panel prints `CRASH-PERSISTENCE PROVEN` with the marker, which is the claim about
+`bwslop_sc_log` finally demonstrated rather than asserted. Because it **closes the tab by
+design**, scenario 1 asserts that a normal RUN ALL produces no crash row at all -- an
+accidental wiring as a tile would make every suite run kill the process.
+
+**The ELF route (why `ftp_server.lua` is unnecessary).** The tools drawer now lists the
+payloads already in `payloads/`, one tap each. `ftpsrv-ps5.elf` and `websrv-ps5.elf` are the
+maintained PS5 FTP / HTTP+WebDAV servers, delivered via `elfldr-ps5-1360.elf` over the
+console's `:9021`. Note the honest limitation: **elfldr is a TCP socket and a GitHub Pages
+page cannot drive it**, which is why `api/payload.php` needs PHP and a server. The panel's
+job here is to put the file and the exact command one tap away, not to pretend it can send
+the binary.
+
 ## 13. DO-NOT-DO list
 
 1. **The UAF is wired ONLY behind `?arm=1`** (the index.html UNSAFE checkbox). Do not
@@ -1086,7 +1159,16 @@ Two bugs this scenario caught during development, both worth remembering:
    deliberately **not** ported: the file-transfer and threading jobs are already covered by
    `ftpsrv-ps5.elf` / `websrv-ps5.elf` and by Web Workers — §12.5.4.
 15. **Do not "just port ftp_server.lua to JS".** It is a blocking `accept()` loop and our
-   executor busy-spins the main thread; the maintained ELF is the correct route §12.5.4.
+   executor busy-spins the main thread; the maintained ELF is the correct route §12.5.4,
+   and the tools drawer now links them.
+16. **Do not read a non-blocking `aio_multi_wait` as "the kernel is patched".** A wait that
+   returns in ~0ms over still-pending requests never waited, so it never armed anything.
+   Read `T3b-timing` / `ARM-timing` first — §12.6.
+17. **Do not treat EINVAL from `aio_multi_wait` as evidence the kernel saw our ids.** The
+   all-zero baseline answers EINVAL too. That false positive was live in the first version
+   of the id differential — §12.6.
+18. **Do not wire the crash self-test as a tile, or call it from RUN ALL.** It kills the
+   WebProcess on purpose; scenario 1 fails the suite if a run ever produces a crash row.
 
 ---
 
