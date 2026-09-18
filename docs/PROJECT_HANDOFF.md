@@ -796,14 +796,26 @@ passes benign pairs and still gates the bug"; all refused ⇒ "PATCHED as expect
 * The v=141-and-earlier `notify()` called `window.send_notification`, which only
   `p2jb_poops.js` ever defines -- a module the syscall-test page never loads. Every
   "NOTIFY" row in every earlier log was a SILENT NO-OP. The operator was right.
+* **v=142 CRASHED EVERY TOAST BEFORE IT WAS SENT (17:26 run: "NOTIFY FAILED threw
+  Invalid mix of BigInt and other type in addition").** `malloc()` returns a BigInt;
+  the buffer write did `buf + 0x2D` -- BigInt + Number, a hard JS TypeError thrown at
+  the very first toast. The offset is now `buf + BigInt(0x2D)`. This is the same
+  class of bug as the `slot_expect + DELTAS.x` one in SS2, so it is now on the
+  BigInt-discipline list.
 * The real implementation (bagagwa_probe.js, `notifySend`) ports
   Theo3535/slopkit's `notify.html` recipe, which the operator confirmed works on
   hardware: a ZEROED 0xC30-byte request with the ASCII message at **+0x2D**
-  (their `NOTIFICATION_REQUEST_SIZE` / `NOTIFICATION_MESSAGE_OFFSET`), delivered via
-  **syscall 0x2CA = SYS_NOTIFY_APP_EVENT** (documented in our own syscalls.js; the
-  libkernel RVA in their 13.60 profile, nt=0x48b0, matches our offsets/13.60.js).
-  Success = ret 0. The 1-arg shape is tried first; EINVAL promotes the session to
-  the 3-arg `(req,0,1)` shape (measured, not guessed).
+  (their `NOTIFICATION_REQUEST_SIZE` / `NOTIFICATION_MESSAGE_OFFSET`).
+  **Corrected in v=143: slopkit does NOT use a syscall.** Their toast calls the
+  libkernel FUNCTION `sceKernelSendNotificationRequest` at `libkernelBase + 0x48B0`
+  -- the same RVA our offsets/13.60.js carries -- with GoldHEN's shape
+  `(0, req, 0xC30, 0)`. So `notifySend` now runs a TWO-ROUTE LADDER, measured:
+  **route 1** = `window.call(kbase + 0x48B0, 0, buf, 0xC30, 0)` (the proven
+  function route, needs `window.call` from p2jb_poops.js and a resolved kbase);
+  **route 2** = syscall `0x2CA` (SYS_NOTIFY_APP_EVENT, our own syscalls.js), shapes
+  `[buf]` then `[0,buf,0xC30,0]`. The first route whose ret is 0 sticks for the
+  session, and the panel logs WHICH route delivered. Scenario 10/10b in
+  test_convention.mjs pins the ladder in both directions.
 * `?notify=0` is the kill switch (Wamphyre/PSAITO's design): suppresses every toast
   if notifications ever wedge the browser.
 * PROVEN buttons (notify / pid / fd / osem / AIO) in the panel footer each fire one
@@ -833,7 +845,8 @@ Wamphyre/PSAITO commit e0f3857's evidence-audit work on 13.x option validation.)
 - **Gated chain pattern** (canary → AIO gate → shot, stop at first closed gate, CHAIN
   RESULT summary) — mirrors our checkbox + RUN ALL gating; already implemented here.
 - **`?notify=0`** — their kill-switch because a wrong `nt` offset can kill the process on
-  notify. Our panel does not have this; if the PS5 notify ever wedges the browser, add it.
+  notify. Our panel has it too (bagagwa_probe.js, `NOTIFY_OFF`): if a toast ever wedges
+  the browser, reload with `&notify=0` and the whole panel still runs.
 - **osem ABI ground truth (osem2_1320.js)**: `CLOSE(0x228, live id) = EPERM` — our 0xa6
   close=0x1 reading was correct; `attr=0x10 or large → EINVAL`; real ids look like
   `0x61ab` (13.20); OPEN searches BY NAME after delete (ESRCH means the name is dead, not

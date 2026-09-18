@@ -132,9 +132,18 @@ function run(name, over, opts) {
             if (key in T) return T[key];
             throw new Error("unscripted syscall " + key);
         },
-        rop_worker: { state: { slot: 0n, fired: 19n, dead: false, stack: 0x0n, kbase: 0n, ctx: 0n, retval: 0n } },
+        rop_worker: { state: { slot: 0n, fired: 19n, dead: false, stack: 0x0n, kbase: opts.kbase !== undefined ? opts.kbase : 0n, ctx: 0n, retval: 0n } },
         P2JB_LK: { "13.60": { slot_expect: 0x1988Bn, syscall_wrapper: 0x1AEB7n, setjmp: 0x1D443n, longjmp: 0x1D49Cn, thread_list: 0x6C218n } },
     };
+    /* window.call = the executor's native-call primitive (p2jb_poops.js). Only present
+     * when a scenario supplies it; notify's route 1 needs it, route 2 (syscall) is the
+     * fallback. `callRet` is what the mocked libkernel function answers. */
+    if (opts.callRet !== undefined) {
+        w.call = function (fn, a0, a1, a2, a3) {
+            calls.push("call+0x" + BigInt(fn).toString(16));
+            return opts.callRet;
+        };
+    }
     if (opts.noCalibStore) storage["bwslop_lk_13.60"] = JSON.stringify({ slot_expect: "104587", syscall_wrapper: "110263", setjmp: "119875", longjmp: "119964", verified: true });
 
     const ctx = {
@@ -158,6 +167,27 @@ const check = (name, cond, extra) => {
     console.log((cond ? "PASS  " : "FAIL  ") + name + (cond || extra === undefined ? "" : "  -- " + String(extra).slice(-320)));
     if (!cond) fails++;
 };
+
+/* 10. notify route ladder -- proves the slopkit/GoldHEN-proven libkernel FUNCTION
+ *    (sceKernelSendNotificationRequest at kbase+0x48B0, shape 0/req/0xC30/0) is tried
+ *    FIRST when window.call exists and a kbase is known, and that the syscall 0x2CA
+ *    fallback is only used when that route does not answer 0. */
+{
+    const { log, calls } = await run("notify-call-route", {}, {
+        search: "?sc=1&scauto=0", kbase: 0x820000000n, callRet: 0n,
+    });
+    check("10: libkernel notify call (kbase+0x48b0) was made", calls.some((c) => /^call\+0x[0-9a-f]+48b0$/.test(c)), calls.join(","));
+    check("10: toast delivered via route 1", log.includes("DELIVERED via route 1"), log.slice(-400));
+    check("10: syscall 0x2ca NOT used once the function route answered 0", !calls.some((c) => c.startsWith("0x2ca")), calls.join(","));
+}
+{
+    const { log, calls } = await run("notify-syscall-fallback", {}, {
+        search: "?sc=1&scauto=0", kbase: 0x820000000n, callRet: 0x1n,
+    });
+    check("10b: the function route was tried and refused (ret 1)", calls.some((c) => /^call\+0x[0-9a-f]+48b0$/.test(c)), calls.join(","));
+    check("10b: syscall 0x2ca fallback used when the function route failed", calls.some((c) => c.startsWith("0x2ca")), calls.join(","));
+    check("10b: toast delivered via route 2", log.includes("DELIVERED via route 2"), log.slice(-400));
+}
 
 /* 1. raw convention, AIO present -- the shape the real 13.60 console produced. */
 {

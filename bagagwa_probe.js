@@ -339,51 +339,96 @@
      * notification ever wedges the browser, the panel still runs with it disabled. */
     var NOTIFY_OFF = false;
     try { NOTIFY_OFF = /(^|[?&])notify=0(&|$)/.test((window.location && window.location.search) || ""); } catch (e) { }
-    var NOTIFY_NR = 0x2CA;          /* SYS_NOTIFY_APP_EVENT */
-    var notifyShape = 0;            /* 0 = undecided, 1 = (req), 2 = (req,0,1) */
+    /* TWO ROUTES, MEASURED AGAINST EACH OTHER.
+     *
+     * slopkit's toast that the operator pointed at as working on 13.60 does NOT use a
+     * syscall: it calls the libkernel FUNCTION sceKernelSendNotificationRequest at
+     * libkernelBase + 0x48B0, with GoldHEN's own shape
+     *     sceKernelSendNotificationRequest(0, req, sizeof(req), 0)
+     * over a struct { char unused[0x2D]; char message[]; } of 0xC30 bytes -- which is why
+     * the message sits at +0x2D and the total is 0xC30. That is a DIFFERENT entry from
+     * syscall 0x2CA (SYS_NOTIFY_APP_EVENT, documented in our own syscalls.js).
+     *
+     * So we try the PROVEN function route first (via the executor's window.call, the same
+     * ROP chain shape as window.syscall), then the syscall as a fallback, and whichever
+     * returns 0 sticks for the session. The log names the winning route, so "notify works"
+     * is a measurement with a provenance, not an assertion. */
+    var NOTIFY_RVA = 0x48B0n;       /* libkernel sceKernelSendNotificationRequest (13.60) */
+    var NOTIFY_NR = 0x2CA;          /* SYS_NOTIFY_APP_EVENT -- fallback route */
+    var NOTIFY_MSG_OFF = 0x2D;
+    var NOTIFY_REQ_SIZE = 0xC30;
+    var notifyRoute = 0;            /* 0 undecided, 1 = libkernel call, 2 = syscall */
     var notifyOK = false;           /* at least one toast DELIVERED (ret 0) this session */
 
+    function notifyKbase() {
+        try {
+            var st = window.rop_worker && window.rop_worker.state;
+            if (st && st.kbase) return B(st.kbase);
+        } catch (e) { }
+        return 0n;
+    }
+    /* Any return other than 0 means the kernel refused; the FIRST route that answers 0
+     * wins and is remembered, so later toasts cost one call, not a ladder. */
     function notifySend(msg) {
         if (NOTIFY_OFF) return { off: true };
-        var text = String(msg).slice(0, 1800);          /* 0xC30 - 0x2D headroom */
-        var buf = zeros(malloc(0xC30), 0xC30);
+        var text = String(msg).slice(0, NOTIFY_REQ_SIZE - NOTIFY_MSG_OFF - 1);
+        var buf = zeros(malloc(NOTIFY_REQ_SIZE), NOTIFY_REQ_SIZE);
         var bytes = new Uint8Array(text.length + 1);
         for (var i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i) & 0x7F;
-        window.write_buffer(buf + 0x2D, bytes);
-        var r = (notifyShape === 2)
-            ? S("notify(0x2CA,req,0,1)", NOTIFY_NR, [buf, 0n, 1n], true, true)
-            : S("notify(0x2CA,req)", NOTIFY_NR, [buf], true, true);
-        if (r.ret !== undefined && B(r.ret) === 0n) {
-            if (notifyShape === 0) notifyShape = 1;
-            notifyOK = true;
-            return { ok: true, ret: r.ret };
-        }
-        /* EINVAL on the undecided 1-arg shape: retry the 3-arg form once; it then sticks
-         * for the whole session. This is the ABI question settled by MEASUREMENT, not by
-         * picking a shape from a writeup. */
-        if (notifyShape === 0 && r.errno === 0x16) {
-            var r2 = S("notify(0x2CA,req,0,1)", NOTIFY_NR, [buf, 0n, 1n], true, true);
-            if (r2.ret !== undefined && B(r2.ret) === 0n) {
-                notifyShape = 2; notifyOK = true;
-                return { ok: true, ret: r2.ret, retry: true };
+        /* malloc() returns a BigInt: a Number offset here throws "Invalid mix of BigInt
+         * and other type in addition" -- exactly why EVERY toast in the 17:26 run failed
+         * before any call was made. The offset must be BigInt. */
+        window.write_buffer(buf + BigInt(NOTIFY_MSG_OFF), bytes);
+        var size = BigInt(NOTIFY_REQ_SIZE);
+
+        /* Route 1: the slopkit/GoldHEN-proven libkernel function. */
+        if (notifyRoute !== 2 && typeof window.call === "function") {
+            var kbase = notifyKbase();
+            if (kbase !== 0n) {
+                var r1;
+                try {
+                    r1 = window.call(kbase + NOTIFY_RVA, 0n, buf, size, 0n);
+                } catch (e) { r1 = undefined; }
+                if (r1 !== undefined && B(r1) === 0n) {
+                    notifyRoute = 1; notifyOK = true;
+                    return { ok: true, route: 1, ret: r1 };
+                }
+                var last1 = (r1 === undefined) ? "call threw" : hex(B(r1));
+            } else {
+                var last1 = "no kbase yet";
             }
-            return { ok: false, errno: r2.errno, errName: r2.errName };
         }
-        return { ok: false, errno: r.errno, errName: r.errName, threw: r.threw, ret: r.ret };
+
+        /* Route 2: the documented syscall. Two shapes, cheapest first. */
+        var shapes = [[buf], [0n, buf, size, 0n]];
+        var lastErr = last1 || "-";
+        for (var si = 0; si < shapes.length; si++) {
+            if (notifyRoute === 1) break;
+            var rs = S("notify(0x2CA shape" + (si + 1) + ")", NOTIFY_NR, shapes[si], true, true);
+            if (rs.ret !== undefined && B(rs.ret) === 0n) {
+                notifyRoute = 2; notifyOK = true;
+                return { ok: true, route: 2, ret: rs.ret };
+            }
+            lastErr = rs.threw || rs.errName || hex(rs.ret === undefined ? 0n : rs.ret);
+        }
+        return { ok: false, detail: lastErr };
     }
 
     function notify(msg) {
-        /* Native toast. Every FAILURE is logged with the kernel's answer; successes are
-         * silent here (the toast itself is the confirmation) except the shape probe. */
+        /* Native toast. Every FAILURE is logged with the kernel's own answer. On the first
+         * success the log names WHICH route delivered (libkernel call vs syscall), so the
+         * operator can read the provenance off the panel. */
+        var before = notifyRoute;
         var res;
         try { res = notifySend(msg); } catch (e) { res = { threw: String((e && e.message) || e).slice(0, 80) }; }
         if (res && res.ok) {
-            if (res.retry) out("NOTIFY", "shape=(req,0,1) PROVEN -- ret 0", "ok");
+            if (before === 0) out("NOTIFY", "DELIVERED via route " + res.route
+                + (res.route === 1 ? " (libkernel call sceKernelSendNotificationRequest, GoldHEN shape)"
+                    : " (syscall 0x2CA)") + " -- ret 0", "ok");
             return true;
         }
         if (res && res.off) return false;
-        out("NOTIFY", "FAILED " + (res.threw ? "threw " + res.threw
-            : (res.errName || hex(res.ret === undefined ? 0n : res.ret))), "err");
+        out("NOTIFY", "FAILED " + (res.threw ? "threw " + res.threw : (res.detail || "unknown")), "err");
         return false;
     }
 
@@ -515,7 +560,9 @@
              * inside the PS5's own notification system right now. ret 0 = delivered. */
             var okd = notify("PROOF: userland syscalls LIVE on " + FW);
             if (okd) {
-                out("PROOF-notify", "toast DELIVERED (syscall 0x2CA ret 0, msg@+0x2D in a 0xC30 request -- slopkit's recipe)", "ok");
+                out("PROOF-notify", "toast DELIVERED -- ret 0 via route " + notifyRoute
+                    + (notifyRoute === 1 ? " (libkernel sceKernelSendNotificationRequest, GoldHEN shape 0/req/0xC30/0)"
+                        : " (syscall 0x2CA)") + "; msg@+0x2D in a 0xC30 zeroed request", "ok");
                 chip(elVerdict, "ok", "notify delivered");
             } else {
                 out("PROOF-notify", "toast NOT delivered -- read the NOTIFY FAILED row for the kernel's answer", "err");
