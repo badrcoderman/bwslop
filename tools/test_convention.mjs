@@ -530,7 +530,10 @@ const check = (name, cond, extra) => {
     check("9: T2c drives setsockopt(IPV6_RTHDR) with the 0x38 tag",
         calls.some((c) => c.startsWith("0x69(") && c.includes(",41,51,")), calls.join(","));
     check("9: T2c probes the IPV6_FL_AUDIT validator", calls.some((c) => c.startsWith("0x69(") && c.includes(",41,109,")), calls.join(","));
-    check("9: T2c drives getsockopt(IPV6_RTHDR)", calls.some((c) => c.startsWith("0x6a(")), calls.join(","));
+    /* 0x076 = SYS_GETSOCKOPT. The tree used to call 0x06A here, which is SYS_LISTEN in
+     * its own syscalls.js -- the model now asserts the CORRECTED number on the wire. */
+    check("9: T2c drives getsockopt(IPV6_RTHDR) on 0x076", calls.some((c) => c.startsWith("0x76(")), calls.join(","));
+    check("9: T2c no longer mislabels listen (0x06A) as getsockopt", !calls.some((c) => c.startsWith("0x6a(") && c.includes(",41,51,")), calls.join(","));
     check("9: T2c drives getrlimit(NOFILE)", calls.some((c) => c.startsWith("0xc2(")), calls.join(","));
     check("9: T2c verdict reached on the refusing kernel", log.includes("T2c-VERDICT") && log.includes("closed again"), log.slice(-600));
     check("9: T2c does NOT claim the cross-fd shape reproduced", !log.includes("CROSS-FD-RETURNED-0"));
@@ -543,7 +546,7 @@ const check = (name, cond, extra) => {
 {
     /* 0x35 must also succeed: the cross-descriptor probe (the headline trigger) needs a
      * victim pair to exist; without one the tile skips it and no ALIVE verdict can fire. */
-    const { log } = await run("t2c-alive", { "0x61": 0x5n, "0x69": 0x0n, "0x6a": 0x0n, "0x87": 0x0n });
+    const { log } = await run("t2c-alive", { "0x61": 0x5n, "0x69": 0x0n, "0x76": 0x0n, "0x87": 0x0n });
     check("9b: accepted pair + echo => the verdict says the 12.x primitives are alive",
         log.includes("THE 12.x CHAIN PRIMITIVES ARE ALIVE"), log.slice(-600));
     check("9b: notify carried the T2c result", log.includes("NOTIFY  T2c:"), log.slice(-600));
@@ -702,6 +705,205 @@ const check = (name, cond, extra) => {
     for (let i = 0; i < 4096; i++) if (reassembled[i] !== IMG[i]) mismatches++;
     check("11: the base64 DECODES back to the exact libkernel bytes (round-trip)",
         mismatches === 0, mismatches + " byte(s) differ");
+}
+
+/* 12. THE NEW EVIDENCE TILES + THE LAYOUT FIX -- verified against a real memory model and
+ *     a modelled kernel, not merely present in the source.
+ *
+ *     What is asserted here:
+ *       - verify:      the ELF magic is read from the real base and the verdict is positive
+ *                      (and the missing webkit mapping is reported, not silently skipped);
+ *       - offtable:    the LIVE P2JB_LK row is printed field by field;
+ *       - umtx:        both surfaces are probed all-zero and reported as present;
+ *       - ftp:         a real socket/bind/listen sequence runs AND the FreeBSD dirent
+ *                      parser turns a crafted directory buffer into the right names;
+ *       - the dumper:  the byte ceiling CLAMPS a too-large request, and the heap watchdog
+ *                      stops the dump itself before the tab dies;
+ *       - the layout:  the tiles region exists and the show/hide toggle actually flips it.
+ */
+{
+    const KB = 0x820000000n;
+    const storage = {}, els = {}, posts = [], calls = [];
+    const doc = {
+        head: makeEl("head"), body: makeEl("body"), createElement: (t) => makeEl(t),
+        getElementById: (id) => (els[id] ||= makeEl("div")), addEventListener: () => { },
+    };
+    els["bwp-durl"] = makeEl("input"); els["bwp-durl"].value = "http://collector.test/dump";
+    els["bwp-dlen"] = makeEl("input"); els["bwp-dlen"].value = "0x999999";   /* must CLAMP */
+    els["bwp-dchunk"] = makeEl("input"); els["bwp-dchunk"].value = "0x400";
+    els["bwp-dbase"] = makeEl("input"); els["bwp-dbase"].value = "lk";
+    els["bwp-dgap"] = makeEl("input"); els["bwp-dgap"].value = "1";
+
+    /* -- the memory model: a window at the base, ELF magic at its head -------- */
+    const mem = new Map();
+    const LO = 0x100000n, HI = 0x400000n;
+    const inRange = (p) => p !== undefined && p >= LO && p < HI;
+    const memGet = (addr, len) => {
+        const a = Number(addr);
+        let b = mem.get(a);
+        if (!b || b.length < len) { b = new Uint8Array(len); mem.set(a, b); }
+        return b;
+    };
+    const IMG = new Uint8Array(0x2000);
+    for (let i = 4; i < IMG.length; i++) IMG[i] = (i * 5 + 3) & 0xff;   /* non-zero code */
+    IMG[0] = 0x7f; IMG[1] = 0x45; IMG[2] = 0x4c; IMG[3] = 0x46;        /* \x7fELF */
+    const imgGet = (addr, n) => {
+        const off = Number(BigInt(addr) - KB);
+        if (off < 0 || off + n > IMG.length) throw new Error("unmapped");
+        return IMG.slice(off, off + n);
+    };
+
+    /* -- a crafted FreeBSD directory buffer -------------------------------- */
+    const DIRENTS = ["app0", "mnt", "dev"];
+    function buildDirents() {
+        const out = [];
+        DIRENTS.forEach((nm, idx) => {
+            const reclen = 12 + nm.length + 1 <= 16 ? 16 : 20;
+            const rec = new Uint8Array(reclen);
+            for (let i = 0; i < 8; i++) rec[7 - i] = (idx + 3) & 0xff;      /* d_fileno (LE) */
+            rec[8] = reclen & 0xff; rec[9] = (reclen >> 8) & 0xff;          /* d_reclen */
+            rec[10] = 4;                                                     /* d_type  */
+            rec[11] = nm.length;                                             /* d_namlen */
+            for (let i = 0; i < nm.length; i++) rec[12 + i] = nm.charCodeAt(i);
+            out.push(...rec);
+        });
+        return new Uint8Array(out);
+    }
+    const DIRBYTES = buildDirents();
+
+    /* -- a heap that grows past the watchdog threshold ----------------------- */
+    let heap = 40 * 1048576;
+    let chunksSeen = 0;
+
+    const w = {
+        fw_str: "13.60",
+        location: { search: "?sc=1&scauto=1" },
+        performance: { memory: { get usedJSHeapSize() { return heap; }, jsHeapSizeLimit: 512 * 1048576 } },
+        localStorage: { getItem: (k) => (k in storage ? storage[k] : null), setItem: (k, v) => { storage[k] = String(v); }, removeItem: (k) => { delete storage[k]; } },
+        send_notification() {}, flushMark() {}, syncMark() {},
+        malloc: () => { const a = 0x200000n; return a; },
+        write_buffer: (addr, bytes) => { memGet(addr, bytes.length).set(bytes); },
+        read_buffer: (addr, len) => {
+            const a = BigInt(addr);
+            if (a >= KB && a < KB + BigInt(IMG.length)) return imgGet(a, len);
+            return new Uint8Array(memGet(a, len));
+        },
+        read64: () => 0n, read32: () => 0n,
+        fetch(url, init) { posts.push(String((init && init.body) || "")); return { then: (ok) => { ok && ok(); return { then: (a) => (a && a(), {}) }; } }; },
+        syscall(nr, a0, a1, a2, a3) {
+            calls.push("0x" + nr.toString(16));
+            if (nr === 0x061) return 7n;              /* socket   -> fd 7 */
+            if (nr === 0x068) return 0n;             /* bind     -> ok   */
+            if (nr === 0x06A) return 0n;             /* listen   -> ok   */
+            if (nr === 0x005) return 8n;             /* open     -> fd 8 */
+            if (nr === 0x110) {                      /* getdents: WRITE the crafted block */
+                memGet(a1, DIRBYTES.length).set(DIRBYTES);
+                return BigInt(DIRBYTES.length);
+            }
+            if (nr === 0x1C6) return 0x16n;          /* umtx_op  -> EINVAL (present) */
+            if (nr === 0x08D) return 0x16n;          /* kqueueex -> EINVAL (present) */
+            if (nr === 0x006) return (a0 === 7n || a0 === 8n) ? 0n : 0x9n;
+            return 0x16n;
+        },
+        rop_worker: { state: { slot: 0n, fired: 19n, dead: false, stack: 0n, kbase: KB, wbase: 0n, ctx: 0n, retval: 0n } },
+        P2JB_LK: { "13.60": { slot_expect: 0x1988Bn, syscall_wrapper: 0x1AEB7n, setjmp: 0x1D443n, longjmp: 0x1D49Cn, thread_list: 0x6C218n } },
+    };
+    const ctx = {
+        window: w, document: doc, localStorage: w.localStorage,
+        setTimeout, Date, JSON, Math, console, Uint8Array, Int32Array,
+        /* performance must be a GLOBAL, the way a browser exposes it: heapNote/heapNow
+         * read the bare identifier, and leaving it only on window made every heap figure
+         * silently zero (which also disables the watchdog) -- a guard that cannot fire is
+         * not a guard. */
+        performance: w.performance,
+        fetch: w.fetch, Blob: class { constructor() { } }, URL: { createObjectURL: () => "blob:x" },
+    };
+    ctx.globalThis = ctx;
+    vm.createContext(ctx);
+    vm.runInContext(src, ctx, { filename: "bagagwa_probe.js" });
+
+    /* the watchdog needs the heap to grow BETWEEN chunks, so bump it per POST */
+    const realSet = w.localStorage.setItem;
+    w.localStorage.setItem = realSet;   /* untouched: the hook below is on fetch */
+    const origFetch = w.fetch;
+    w.fetch = function (u, i) { if (String((i && i.body) || "").startsWith("BAGA ")) { chunksSeen++; if (chunksSeen >= 2) heap = 400 * 1048576; } return origFetch(u, i); };
+    ctx.fetch = w.fetch;
+
+    const frags = [];
+    let elapsed = 0;
+    /* RECORD EVERY WRITE rather than SAMPLE the store. The store is throttled with a
+     * trailing flush, so sampling could miss the final write and make a line that IS in
+     * the panel read as absent -- a flaky test is worse than no test. Hooking setItem
+     * captures each version, and the union of them is the exact reconstructed log. */
+    const snapSet = w.localStorage.setItem;
+    w.localStorage.setItem = function (key, value) {
+        if (key === "bwslop_sc_log") frags.push(String(value));
+        return snapSet(key, value);
+    };
+    await new Promise((res) => setTimeout(res, 3500));
+    if (storage["bwslop_sc_log"]) frags.push(storage["bwslop_sc_log"]);
+    const log = frags.join("\n");
+
+    /* -- verify ------------------------------------------------------------ */
+    check("12: verify reads the ELF magic at the real libkernel base",
+        /VER-libkernel {2}first bytes 7f 45 4c 46 {2}ascii \|\.ELF\| {2}ELF/.test(log),
+        log.split("\n").filter((l) => l.includes("VER-")).join(" // ").slice(-400));
+    check("12: verify reports a base it could NOT resolve instead of hiding it",
+        /VER-libwebkit {2}no base resolved/.test(log),
+        log.split("\n").filter((l) => l.includes("VER-libwebkit")).join(" // "));
+    check("12: verify verdict counts the verified bases",
+        /VER-verdict {2}1\/2 bases carry 7f 45 4c 46/.test(log),
+        log.split("\n").filter((l) => l.includes("VER-verdict")).join(" // "));
+    check("12: verify prints the byte window as a hexdump line (the VERY SMALL text)",
+        /0x0*820000000 {2}7f 45 4c 46/.test(log), "no tiny dump line");
+
+    /* -- real offsets ------------------------------------------------------ */
+    check("12: offtable prints the live P2JB_LK row field by field",
+        log.includes("OFFT-slot_expect") && log.includes("OFFT-thread_list") && log.includes("OFFT-syscall_wrapper"), log.slice(-900));
+    check("12: offtable verdict counts the live fields",
+        /OFFT-verdict {2}5 field\(s\) from the LIVE P2JB_LK row/.test(log),
+        log.split("\n").filter((l) => l.includes("OFFT-verdict")).join(" // "));
+
+    /* -- umtx / kqueueex --------------------------------------------------- */
+    check("12: umtx probes both surfaces all-zero",
+        calls.includes("0x1c6") && calls.includes("0x8d"), calls.join(","));
+    check("12: umtx verdict reports them PRESENT (EINVAL, not ENOSYS)",
+        /UMTX-VERDICT[\s\S]{0,200}umtx_op EXISTS, kqueueex EXISTS/.test(log),
+        log.split("\n").filter((l) => l.includes("UMTX-VERDICT")).join(" // "));
+
+    /* -- socket + files (the FTP question) --------------------------------- */
+    check("12: ftp opens a socket, binds 1337 and listens",
+        log.includes("FTP-socket  AF_INET stream socket fd=7") && log.includes("FTP-bind") && log.includes("the port is OURS") && log.includes("a LISTENING socket exists"), log.slice(-1200));
+    check("12: ftp parses the crafted dirents into the right names",
+        /FTP-files {2}getdents\("\/"\) -> \d+ bytes, 3 entr\(y\/ies\): app0, mnt, dev/.test(log),
+        log.split("\n").filter((l) => l.includes("FTP-files")).join(" // "));
+    check("12: ftp verdict states the accept() limitation instead of implying a server",
+        /FTP-VERDICT[\s\S]{0,900}accept\(\)/.test(log) && log.includes("ftpsrv-ps5.elf"), log.slice(-1400));
+    check("12: ftp closed everything it opened",
+        calls.filter((c) => c === "0x6").length >= 2, calls.join(","));
+
+    /* -- the dump: clamp + watchdog ---------------------------------------- */
+    check("12: dump CLAMPS an over-large byte request in code, not in the input box",
+        log.includes("bytes clamped to 262144"), log.slice(-1500));
+    check("12: the BAGA-BEGIN frame carries the CLAMPED total",
+        (posts.find((p) => p.startsWith("BAGA-BEGIN")) || "").includes("total=262144"),
+        posts.find((p) => p.startsWith("BAGA-BEGIN")));
+    check("12: the HEAP WATCHDOG stops the dump itself with a named verdict",
+        log.includes("DUMP-OOM-GUARD") && /HEAP-WATCHDOG \(\+\d/.test(log),
+        log.split("\n").filter((l) => l.includes("OOM-GUARD") || l.includes("DUMP-VERDICT")).join(" // ").slice(-400));
+    check("12: the dump verdict says it stopped early on purpose",
+        /DUMP-VERDICT[\s\S]{0,400}STOPPED EARLY BY HEAP-WATCHDOG/.test(log), log.slice(-700));
+
+    /* -- layout: the tiles region and its show/hide toggle ------------------ */
+    check("12: the panel built a scrolling tiles region", !!els["bwp-top"], Object.keys(els).join(",").slice(0, 200));
+    const pvBtn = els["bwp-payloadsbtn"], topEl = els["bwp-top"];
+    const before = topEl.style.display;
+    if (pvBtn && typeof pvBtn.onclick === "function") pvBtn.onclick();
+    check("12: the show/hide payloads toggle flips the tiles region",
+        topEl.style.display === "none" && before !== "none" && pvBtn.textContent === "show tiles",
+        "before=" + JSON.stringify(before) + " after=" + JSON.stringify(topEl.style.display) + " label=" + pvBtn.textContent);
+    check("12: hiding the tiles is remembered in localStorage",
+        storage["bwslop_tiles_hidden"] === "1", String(storage["bwslop_tiles_hidden"]));
 }
 
 console.log(fails ? `\n${fails} check(s) FAILED` : "\nall convention scenarios pass");

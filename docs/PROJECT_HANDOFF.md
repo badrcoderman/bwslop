@@ -349,7 +349,7 @@ range is `+0xF0` wrecks two unrelated qwords.
 
 ---
 
-## 9. `bagagwa_probe.js` — the Syscall test panel (2788 lines, the file we own)
+## 9. `bagagwa_probe.js` — the Syscall test panel (3413 lines, the file we own)
 
 > The panel grew past its read-only tile set on 2026-09-18: **read-only** evidence tools
 > (offset verification, libkernel peek, the streaming dumper) and a **remote JS loader**
@@ -1115,6 +1115,98 @@ page cannot drive it**, which is why `api/payload.php` needs PHP and a server. T
 job here is to put the file and the exact command one tap away, not to pretend it can send
 the binary.
 
+## 12.8 The layout fix, the OOM answer, and four new evidence tiles — 2026-09-19
+
+Operator report that drove this pass: *"frontend can't scroll, cards too big, all dump
+payloads give OOM, add a show/hide payloads section, make it simple; verify with very small
+text from libkernel; show real offsets; did you add socket-open FTP to read files we can see
+in the process?"* Every item below is answered with a measurement or a code-level guard, not
+with prose.
+
+### 12.8.1 The layout — one scrolling region, and it can be hidden
+
+**The bug was structural.** `.bwp-root` is `position:fixed;inset:0` with
+`display:flex;flex-direction:column`, and the old sheet gave the log `flex:1` while the card
+grid was free to grow. On a short viewport the grid + header + footer pushed past 100vh, and
+a fixed, non-scrolling root cannot be scrolled — the footer and half the cards were simply
+unreachable.
+
+What changed:
+
+- **`.bwp-top`** wraps the card grid and is the only scrolling region
+  (`flex:1 1 auto;min-height:3rem;overflow-y:auto`). Header, log and footer stay pinned.
+- **The log is shrinkable** (`flex:0 1 30vh;min-height:7rem`) so a short viewport squeezes it
+  instead of pushing the footer off-screen.
+- **Cards are small**: grid `minmax(9.5rem,1fr)` (was 15.5rem), tile padding 8/10px (was
+  13/15px), name `.84rem`, description `.64rem` clamped to two lines. Buttons are smaller
+  too.
+- **`max-height` cleared on fullscreen.** The new `max-height:46vh` on `.bwp-out` still
+  applies to the `position:fixed` fullscreen box, which would have letterboxed fullscreen —
+  `.bwp-out.fs` now sets `max-height:none;height:auto`.
+- **Show/hide payloads** (head button + `bwslop_tiles_hidden`): the grid is the only tall
+  part of the page, so it is the one thing with a toggle, and hiding it lets the log take the
+  freed space (`bwp-root.tiles-off`).
+
+### 12.8.2 The OOM — three separate causes, three separate fixes
+
+The operator's "all dump payloads give OOM" was not one bug:
+
+1. **Unbounded `LOG`.** The DOM was trimmed at `MAXDOM` but the array behind it grew for the
+   life of the page. Both now share one cap (§9).
+2. **`localStorage` churn.** `persistAppend` did `getItem` + concat + `setItem` of a 64 KB
+   value **on every line** — O(n²) string work per line. It is now an in-memory tail flushed
+   at most 4x/second, with verdict/crash/throw lines forcing an immediate flush, plus a
+   **trailing timer** so the last quiet lines still reach the store (without it the tail sat
+   in memory and never landed — which is how this pass first "lost" the startup rows).
+   Budget is a bounded one-shot 200 KB write, not a per-line rewrite.
+3. **The dump itself.** `DUMP_MAX_BYTES = 0x40000` and `DUMP_MAX_CHUNK = 0x2000` are clamped
+   **in code, not in the input box** ("a guard you can type away is not a guard"), the gap
+   between chunks is settable and floored at 8 ms, and a **heap watchdog** reads the live JS
+   heap before every chunk and stops the dump itself with a named verdict
+   (`DUMP-OOM-GUARD … HEAP-WATCHDOG (+N MB > 96 MB)`) instead of letting the tab die.
+   Scenario 12 proves the clamp and the watchdog both fire.
+4. **ELF links are now `download`, not navigation.** Handing a multi-megabyte ELF to the
+   browser to render/navigate is its own OOM on a console.
+
+### 12.8.3 Four new tiles
+
+| Tile | What it proves |
+|---|---|
+| **Verify bases (ELF)** | Reads the first bytes at the libkernel/libwebkit bases and checks the **ELF magic `7f 45 4c 46`**. That pattern is the one thing a wrong base cannot fake — every other anchor can be a plausible-looking word. Prints the header + notify entry as a hexdump in **very small text** (`.bwp-tiny`, 9px). |
+| **Real offsets** | Prints every field of the **live `P2JB_LK` row** (the table the executor was initialised from, not a copy in a document) plus the `OFFSET_*` globals on the page, each `typeof`-guarded so a page without the offsets file degrades to "not on this page" instead of a ReferenceError. |
+| **UMTX / kqueueex** | Probes the other two documented kernel surfaces (`0x1C6 SYS__UMTX_OP`, `0x8D SYS_KQUEUEEX`) **all-zero**, where op 0 with a null address is an argument error the kernel rejects before touching a lock or queue. ENOSYS is the only result that says a surface was removed; EINVAL/EFAULT says it is there. |
+| **Socket + files (FTP)** | Answers the FTP question directly: opens a real socket, binds `0.0.0.0:1337` (FreeBSD `sa_len/sa_family` sockaddr), listens, then lists the process's own root with `getdents` into a bounded buffer and parses the FreeBSD dirent records. Everything is closed again. |
+
+**The FTP answer, stated plainly.** The socket half works from the executor; a *server* also
+needs `accept()`, which **blocks**, and this executor busy-spins the main thread inside a
+syscall — a page-side accept loop would wedge the browser rather than serve files. That is
+the same lesson as the AIO/`0x7FF` wedges, and it is why `ftpsrv-ps5.elf` (tools) remains
+the route for real FTP: it serves from its own process. The file half above is what **this**
+process can see.
+
+### 12.8.4 A real bug fixed while answering "show real offsets"
+
+`pKbugs` called syscall **`0x06A`** and labelled it `getsockopt`. `0x06A` is
+**`SYS_LISTEN`** in this tree's own `syscalls.js` (FreeBSD numbering: 104 bind, 105
+setsockopt, 106 listen, 118 getsockopt) — so the "read side" row was really calling
+`listen()` on a connected socket. The read-back and the cross-descriptor bug-shape probe now
+use **`0x076` `SYS_GETSOCKOPT`**, and the harness asserts the corrected number on the wire
+and that `0x06A` is never again passed the IPV6 option arguments.
+
+### 12.8.5 Harness coverage added
+
+Scenario **12** in `test_convention.mjs` drives all four new tiles against a real memory
+model plus a modelled kernel, and asserts: the ELF magic is read from the real base and the
+unresolvable webkit base is reported rather than hidden; the live `P2JB_LK` row is printed
+field by field; `umtx_op`/`kqueueex` are both probed and reported present; a real
+socket/bind/listen sequence runs; the **crafted FreeBSD dirent block parses into exactly
+`app0, mnt, dev`**; the dumper **clamps** an over-large request and the **heap watchdog stops
+it**; and the tiles region exists with a toggle that flips it and remembers the choice.
+
+`performance` had to be exposed as a **global** in that harness, not just on `window`:
+`heapNow()`/`heapNote()` read the bare identifier, so it was silently returning 0 — which
+also meant the watchdog could never fire. A guard that cannot fire is not a guard.
+
 ## 13. DO-NOT-DO list
 
 1. **The UAF is wired ONLY behind `?arm=1`** (the index.html UNSAFE checkbox). Do not
@@ -1169,6 +1261,23 @@ the binary.
    of the id differential — §12.6.
 18. **Do not wire the crash self-test as a tile, or call it from RUN ALL.** It kills the
    WebProcess on purpose; scenario 1 fails the suite if a run ever produces a crash row.
+19. **Do not "just build an FTP server in the page".** `accept()` blocks and the executor
+   busy-spins the main thread inside a syscall, so the loop would wedge the browser. The
+   Socket + files tile measures the reachable half and says so; `ftpsrv-ps5.elf` is the
+   server — §12.8.3.
+20. **Do not call `bind`/`listen` outside the Socket + files tile.** Binding a port is the
+   one non-read-only act in the read-only suite (it allocates a kernel socket and leaves the
+   port in TIME_WAIT briefly); it is deliberate, bounded, and closed again. Nothing else may
+   start doing it silently. — §12.8.3
+21. **Do not put a `max-height` on a `position:fixed` rule.** The 46vh cap on `.bwp-out`
+   also applied to the fullscreen box and would have letterboxed fullscreen; the fullscreen
+   rule must clear it. — §12.8.1
+22. **Do not remove the trailing flush from `persistAppend`.** Throttling alone means the
+   last lines of a quiet page never reach the store, which for a crash-recovery log is the
+   same as losing them — and it silently broke three assertions when this pass first tried
+   it. — §12.8.2
+23. **Do not raise the dumper's byte/chunk ceilings from the input box.** They are clamped
+   in code precisely because they are the OOM guard. — §12.8.2
 
 ---
 
@@ -1185,7 +1294,9 @@ node tools/test_convention.mjs     # raw / converted / plain-1 conventions,
                                    #   live-request tile incl. num>=2 tripwire,
                                    #   notify route ladder (10/10b),
                                    #   evidence tools: offsets / peek / dumper
-                                   #   ROUND-TRIP against a modelled image (11)
+                                   #   ROUND-TRIP against a modelled image (11),
+                                   #   verify / real-offsets / umtx / socket+files,
+                                   #   dump CLAMP + HEAP WATCHDOG, tiles toggle (12)
 node tools/test_abimap.mjs         # 16 checks: deduction under 4 kernel shapes,
                                    #   attribution of which phase saw what,
                                    #   and the ARMING-SAFETY TRIPWIRE
@@ -1201,6 +1312,18 @@ that matters. It also reads the persisted log **repeatedly and joins the fragmen
 because that store is a bounded tail — a single read at the end would silently lose what
 the earlier tiles wrote, which is the same trap the panel's own crash-recovery log set
 (see §12.5.2, where that trap turned out to be a real overrun in the 16k budget).
+
+**Scenario 12 (v=147) — the new tiles, the clamp and the toggle.** Same memory-model idea as
+11, extended with a modelled kernel: the ELF magic is read from the real base (and an
+unresolvable webkit base is reported, not hidden), the live `P2JB_LK` row is printed field by
+field, both umtx surfaces are probed, `bind`/`listen` run, and a **crafted FreeBSD dirent
+block must parse into exactly `app0, mnt, dev`**. Then the dumper must **clamp** an
+over-large byte request in code and the **heap watchdog must stop the dump itself**. It ends
+with the layout: the tiles region exists and its toggle flips it and persists the choice.
+Two harness bugs it caught in this pass are worth remembering: a synchronous tile's rows can
+be missed by *sampling* the throttled store (record every `setItem` instead), and
+`performance` must be exposed as a **global** or `heapNow()` silently returns 0 and the
+watchdog can never fire.
 
 **The parity harness (v=144).** The 13.60 userland table lives in three places --
 `offsets/13.60.js`, `bagagwa.js`'s `USERLAND_1360`, and
