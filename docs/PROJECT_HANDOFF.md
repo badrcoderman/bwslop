@@ -1242,6 +1242,33 @@ it**; and the tiles region exists with a toggle that flips it and remembers the 
 `heapNow()`/`heapNote()` read the bare identifier, so it was silently returning 0 — which
 also meant the watchdog could never fire. A guard that cannot fire is not a guard.
 
+### 12.9 The master study — every repo read, the whole architecture mapped (2026-09-19)
+
+**Read `docs/PS5_JAILBREAK_MASTER_STUDY.md` first when resuming.** It is the
+layer-above document: every PS5 exploit repo in this workspace read end-to-end, the
+invariant five-beat structure every jailbreak shares (bug → primitive → pipe R/W →
+ucred/rootvnode → kexp/elfldr), which repo demonstrates which beat, the full bug
+inventory with 13.60 status, and the phase-by-phase 13.60 roadmap.
+
+The short version:
+
+* **Beats 3–7 are porting work, not research** — p2jb stages 3–7, the kexp payload_args
+  contract (`master_pipe/victim_pipe/allproc/elfldr`), and the elfldr tail are all in
+  this workspace and transfer verbatim once *any* stable kernel R/W exists.
+* **The only live kernel lead on 13.60 is the AIO UAF.** Everything else public is
+  patched (p2jb ≤12.02, poops ≤13.00, Lapse ≤10.01, UMTX ≤7.61); Gezine's bug is
+  private. Our probe has proven the AIO family exists and answers on 13.60, measured
+  `(ids, num)` = args 1–2, proved osem handles work, and proved the armed wait does not
+  yet block — i.e. the id **matching** is the missing piece, not the kernel's patch.
+* **The research queue, in order:** (1) id encoding until `num=1` BLOCKS, (2) `mode`
+  position, (3) armed `num=2` with an EMPTY pipe (never bagagwa-chain's pre-filled
+  one), (4) iov/uio reclaim instead of osem-reclaim (attacker bytes at a kernel
+  address), (5) the R/W window pair for the reclaimed object. Each is one measurable
+  panel step.
+* **Hard ceilings to internalise** (from the UMTX repo, still true): kernel `.text` is
+  XOM (no kernel gadget dumps), the hypervisor enforces kernel W^X (no kernel patches),
+  CFI is on. A jailbreak is R/W + ucred, never kernel code exec.
+
 ## 13. DO-NOT-DO list
 
 1. **The UAF is wired ONLY behind `?arm=1`** (the index.html UNSAFE checkbox). Do not
