@@ -2574,7 +2574,11 @@
      * It does NOT run an FTP server, and that limitation is stated rather than hidden:
      * accept() is BLOCKING, and this executor busy-spins the main thread inside a syscall,
      * so a page-side accept loop would wedge the browser exactly like the AIO/0x7FF
-     * lessons. The ELF route (ftpsrv-ps5.elf, linked in tools) serves from its own process.
+     * lessons. The ELF route (ftpsrv-ps5.elf, linked in tools) serves from its own process,
+     * BUT LAUNCHING ANY ELF NEEDS A JAILBREAK FIRST -- main.js refuses to load elfldr in
+     * webkit-only mode ("in webkit only mode it wont be loaded") and p2jb_poops.js says the
+     * stage-7 elfldr helpers are "only USED after jailbreak". On 13.60 the p2jb/poops kernel
+     * chains are patched, so there is no jailbreak and no ELF can be started from here.
      *
      * Everything opened here is closed again. The root listing comes from getdents into a
      * BOUNDED buffer, so a big directory cannot balloon the heap. */
@@ -2647,7 +2651,8 @@
         out("FTP-VERDICT", "socket=" + (ok.s ? "yes" : "no") + " bind=" + (ok.b ? "yes" : "no") + " listen=" + (ok.l ? "yes" : "no")
             + " file-listing=" + (ok.f ? "yes" : "no")
             + ". The honest answer to \"an FTP server inside the page\": the SOCKET half is measurable and works from this executor, but a server ALSO needs accept(), which BLOCKS \u2014 and this executor busy-spins the main thread inside a syscall, so a page-side accept loop would wedge the browser rather than serve files. "
-            + "ftpsrv-ps5.elf (tools) runs the real server in its own process; the file half above is what THIS process can see. Everything opened here was closed again.",
+            + "ftpsrv-ps5.elf (tools) is the maintained server, but it is an ELF, and an ELF cannot be launched without a JAILBREAK -- which 13.60 has no way to get while p2jb/poops are patched. "
+            + "The file half above is what THIS process can see. Everything opened here was closed again.",
             (ok.s && ok.l) ? "ok" : "warn");
         return { ok: ok.s, summary: "socket=" + (ok.s ? 1 : 0) + " bind=" + (ok.b ? 1 : 0) + " listen=" + (ok.l ? 1 : 0) + " files=" + (ok.f ? 1 : 0) };
     }
@@ -3019,7 +3024,8 @@
             desc: "Read-only. Opens a REAL socket, binds 0.0.0.0:1337 and listens (the entry "
                 + "point an FTP server needs), then lists the process's own root with "
                 + "getdents. Everything is closed again. It does NOT run a server -- accept() "
-                + "blocks and this executor busy-spins the thread (see the verdict).",
+                + "blocks and this executor busy-spins the thread -- and no ELF can be "
+                + "launched without a jailbreak (see the verdict).",
         },
         {
             id: "exec", label: "Executor state", run: pExecutor,
@@ -3181,7 +3187,10 @@
             + "ps5-payload-dev/websrv (HTTP+webdav, port 8080); the Lua route is NOT usable here -- "
             + "n0llptr/remote_lua_loader needs a specific Artemis-engine game installed plus crafted "
             + "savedata, so ftp_server.lua cannot run on this page. For FTP on the console use "
-            + "ftpsrv-ps5.elf above (WinSCP; FileZilla has known issues).";
+            + "ftpsrv-ps5.elf above (WinSCP; FileZilla has known issues) -- but note the ELF row: "
+            + "an ELF needs a JAILBREAK to launch, and 13.60 has none while p2jb/poops are patched, "
+            + "so those links are a route for a firmware that HAS one (or for after Bagagwa), not a "
+            + "working FTP today. The Socket + files tile is the part that answers for THIS process.";
     } catch (e) { }
 
     /* ---- SHOW/HIDE THE TILES. The card grid is the only part of the panel that can get
@@ -3255,12 +3264,18 @@
     };
 
     /* ============================================ PAYLOADS (the ELF route)
-     * The reason the Lua `ftp_server.lua` detour is not needed: this repo already ships the
-     * maintained servers as ELFs. They are delivered by elfldr, which listens on the console
-     * at :9021 -- that is a TCP socket, so it CANNOT be driven from a page served by GitHub
-     * Pages (our api/payload.php path needs PHP and a server). What this panel can honestly
-     * do is put the files one tap away and give the exact command, so "I want FTP on the
-     * console" has a route that works on 13.60 instead of one that needs a specific game. */
+     * This repo ships the maintained servers as ELFs. They are delivered by elfldr, which
+     * listens on the console at :9021 -- a TCP socket, so it CANNOT be driven from a page
+     * served by GitHub Pages (our api/payload.php path needs PHP and a server).
+     *
+     * AND, more importantly, THIS ROUTE IS NOT USABLE ON 13.60 TODAY. An ELF payload needs a
+     * JAILBREAK to be launched at all: elfldr is not a userland loader, it is started BY the
+     * kernel exploit, and main.js says so outright -- in webkit-only mode it refuses to load
+     * elfldr ("in webkit only mode it wont be loaded"), while p2jb_poops.js records that the
+     * stage-7 elfldr helpers are "only USED after jailbreak". 13.60 is exactly the case where
+     * p2jb/poops are patched, so there is no jailbreak, so these files cannot run. They are
+     * listed because they are the correct route ON A FIRMWARE THAT HAS ONE (or once a
+     * kernel bug like Bagagwa lands here) -- not because tapping one will do anything now. */
     var ELFS = [
         ["ftpsrv-ps5.elf", "FTP server \u2014 the real answer to ftp_server.lua; WinSCP, not FileZilla"],
         ["websrv-ps5.elf", "HTTP + WebDAV payload server (ps5-payload-dev/websrv)"],
@@ -3281,7 +3296,9 @@
         if (pv) {
             var lab = document.createElement("span");
             lab.className = "bwp-lab";
-            lab.textContent = "ELF payloads \u2192";
+            /* The label carries the precondition. An unqualified list of payload links reads
+             * as "tap to run", and on this firmware that is false. */
+            lab.textContent = "ELF payloads (need a JAILBREAK \u2014 cannot run on " + FW + " while p2jb/poops are patched) \u2192";
             pv.appendChild(lab);
             for (var ei = 0; ei < ELFS.length; ei++) {
                 var a2 = document.createElement("a");

@@ -290,6 +290,26 @@ evidence and the published primary has none (§10).
 `payloads/` ships `elfldr-ps5-1360.elf`. The **name** suggests 13.60 support. It is a
 filename, not a capability. Same class of trap as `offsets/kernel/data.js` (§8.3).
 
+### 8.1.0 **An ELF payload cannot be launched without a JAILBREAK** (added 2026-09-19)
+
+This is the load-bearing precondition behind every "just use `ftpsrv-ps5.elf`" sentence,
+and this repo already says so in two places:
+
+* `main.js:557` — in webkit-only mode it **refuses to load elfldr** at all: *"elfldr doesnt
+  seem to be running and in webkit only mode it wont be loaded, continue?"*, and the loader
+  call itself sits **after** `log("Jailbreaking...")` (main.js:648, 880).
+* `p2jb_poops.js:407` — the stage-7 (elfldr) helpers are *"only USED after jailbreak
+  (stages 0-5 use p2jb's own pipe krw)"*.
+
+So elfldr is not a userland loader that happens to be started over TCP: it is mapped and
+jumped to **by the kernel exploit**, and everything downstream (`:9021`, the payload
+servers, the FTP files) lives behind that. On 13.60, where p2jb and poops are patched, there
+is **no jailbreak** — therefore no ELF route, no FTP server, and no payload launcher, no
+matter which links the panel shows. The links exist for a firmware that *has* a jailbreak
+(or for after a kernel bug such as Bagagwa lands here); they are not a working route today.
+This is the same class of trap as the filename above, one level deeper: a link to a file
+that cannot be started looks identical to a link to one that can.
+
 ### 8.1.1 **Calling an unproven syscall number WEDGES the kernel** (hardware lesson)
 
 T0's first draft ended with `syscall 0x7FF` expecting ENOSYS. On real 13.60 the kernel did
@@ -349,7 +369,7 @@ range is `+0xF0` wrecks two unrelated qwords.
 
 ---
 
-## 9. `bagagwa_probe.js` — the Syscall test panel (3413 lines, the file we own)
+## 9. `bagagwa_probe.js` — the Syscall test panel (3430 lines, the file we own)
 
 > The panel grew past its read-only tile set on 2026-09-18: **read-only** evidence tools
 > (offset verification, libkernel peek, the streaming dumper) and a **remote JS loader**
@@ -1107,13 +1127,21 @@ load the panel prints `CRASH-PERSISTENCE PROVEN` with the marker, which is the c
 design**, scenario 1 asserts that a normal RUN ALL produces no crash row at all -- an
 accidental wiring as a tile would make every suite run kill the process.
 
-**The ELF route (why `ftp_server.lua` is unnecessary).** The tools drawer now lists the
-payloads already in `payloads/`, one tap each. `ftpsrv-ps5.elf` and `websrv-ps5.elf` are the
-maintained PS5 FTP / HTTP+WebDAV servers, delivered via `elfldr-ps5-1360.elf` over the
-console's `:9021`. Note the honest limitation: **elfldr is a TCP socket and a GitHub Pages
-page cannot drive it**, which is why `api/payload.php` needs PHP and a server. The panel's
-job here is to put the file and the exact command one tap away, not to pretend it can send
-the binary.
+**The ELF route (why `ftp_server.lua` is unnecessary — and why it is not usable today).**
+The tools drawer lists the payloads already in `payloads/`, one tap each. `ftpsrv-ps5.elf` and
+`websrv-ps5.elf` are the maintained PS5 FTP / HTTP+WebDAV servers, delivered via
+`elfldr-ps5-1360.elf` over the console's `:9021`. Two honest limitations, and the second one
+is the fatal one:
+
+1. **elfldr is a TCP socket**, so a GitHub Pages page cannot drive it (`api/payload.php`
+   needs PHP and a server).
+2. **An ELF needs a JAILBREAK to be launched at all** — see §8.1.0. elfldr is started *by*
+   the kernel exploit, and `main.js` refuses to load it in webkit-only mode. On 13.60 p2jb
+   and poops are patched, so there is no jailbreak and **no ELF payload can run**. The links
+   are a route for a firmware that has one (or for after Bagagwa); they are not a working FTP
+   today, and the panel now says so in the row label, the tools note and the tile verdict —
+   `test_convention` scenario 12 fails the suite if that precondition is ever dropped from
+   the text.
 
 ## 12.8 The layout fix, the OOM answer, and four new evidence tiles — 2026-09-19
 
@@ -1177,12 +1205,19 @@ The operator's "all dump payloads give OOM" was not one bug:
 | **UMTX / kqueueex** | Probes the other two documented kernel surfaces (`0x1C6 SYS__UMTX_OP`, `0x8D SYS_KQUEUEEX`) **all-zero**, where op 0 with a null address is an argument error the kernel rejects before touching a lock or queue. ENOSYS is the only result that says a surface was removed; EINVAL/EFAULT says it is there. |
 | **Socket + files (FTP)** | Answers the FTP question directly: opens a real socket, binds `0.0.0.0:1337` (FreeBSD `sa_len/sa_family` sockaddr), listens, then lists the process's own root with `getdents` into a bounded buffer and parses the FreeBSD dirent records. Everything is closed again. |
 
-**The FTP answer, stated plainly.** The socket half works from the executor; a *server* also
-needs `accept()`, which **blocks**, and this executor busy-spins the main thread inside a
-syscall — a page-side accept loop would wedge the browser rather than serve files. That is
-the same lesson as the AIO/`0x7FF` wedges, and it is why `ftpsrv-ps5.elf` (tools) remains
-the route for real FTP: it serves from its own process. The file half above is what **this**
-process can see.
+**The FTP answer, stated plainly.** The socket half works from the executor. The *server*
+half does not, for two independent reasons:
+
+1. A server needs `accept()`, which **blocks**, and this executor busy-spins the main thread
+   inside a syscall — a page-side accept loop would wedge the browser rather than serve files
+   (the same lesson as the AIO / `0x7FF` wedges).
+2. `ftpsrv-ps5.elf` is the maintained route, but it is an **ELF, and an ELF needs a jailbreak
+   to launch** (§8.1.0) — which 13.60 cannot get while p2jb/poops are patched.
+
+So on this firmware there is **no FTP route at all today**: not from the page (blocking
+`accept`), and not from the ELF (needs a jailbreak). The file half above is the part that
+answers for **this** process, and it is why the tile's verdict says so instead of pointing at
+a payload that cannot start.
 
 ### 12.8.4 A real bug fixed while answering "show real offsets"
 
@@ -1278,6 +1313,15 @@ also meant the watchdog could never fire. A guard that cannot fire is not a guar
    it. — §12.8.2
 23. **Do not raise the dumper's byte/chunk ceilings from the input box.** They are clamped
    in code precisely because they are the OOM guard. — §12.8.2
+24. **Do not describe any ELF payload as a usable route on 13.60.** elfldr is started by the
+   kernel exploit; `main.js` will not load it in webkit-only mode and `p2jb_poops.js` says
+   its elfldr helpers are "only USED after jailbreak". No jailbreak here ⇒ no ELF, no FTP
+   server, no payload launcher, whatever the links say. The panel's ELF row, tools note and
+   FTP verdict all carry that precondition **on purpose**, and scenario 12 fails the suite if
+   it is dropped. — §8.1.0 / §12.7 / §12.8.3
+25. **Do not let a filename imply a capability.** `elfldr-ps5-1360.elf` is the canonical
+   example (§8.1); a link to a file that cannot be started looks exactly like a link to one
+   that can. — §8.1.0
 
 ---
 

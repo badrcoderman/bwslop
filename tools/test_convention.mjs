@@ -879,6 +879,19 @@ const check = (name, cond, extra) => {
         log.split("\n").filter((l) => l.includes("FTP-files")).join(" // "));
     check("12: ftp verdict states the accept() limitation instead of implying a server",
         /FTP-VERDICT[\s\S]{0,900}accept\(\)/.test(log) && log.includes("ftpsrv-ps5.elf"), log.slice(-1400));
+    /* AN ELF CANNOT BE LAUNCHED WITHOUT A JAILBREAK (main.js refuses elfldr in webkit-only
+     * mode; p2jb_poops.js says its stage-7 elfldr helpers are "only USED after jailbreak").
+     * The panel must say that where it lists the payloads, or an unqualified link list reads
+     * as "tap to run" on the one firmware that cannot. */
+    check("12: ftp verdict says an ELF needs a jailbreak, which 13.60 cannot get",
+        /FTP-VERDICT[\s\S]{0,1200}JAILBREAK/.test(log), log.slice(-1600));
+    check("12: the payload list is labelled with the jailbreak precondition",
+        String(els["bwp-note"].textContent).includes("JAILBREAK"),
+        String(els["bwp-note"].textContent).slice(0, 200));
+    check("12: the ELF row label carries the precondition too",
+        String(els["bwp-payloads"].textContent || "").includes("JAILBREAK") ||
+        String(els["bwp-payloads"].children.map((c) => c.textContent).join(" ")).includes("JAILBREAK"),
+        "label missing");
     check("12: ftp closed everything it opened",
         calls.filter((c) => c === "0x6").length >= 2, calls.join(","));
 
